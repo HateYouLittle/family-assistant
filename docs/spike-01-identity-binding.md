@@ -82,15 +82,19 @@ SQLite 复用正式 schema 的 member + todo + api_token 部分。
 
 ## 上线检查项（正式开发前逐条确认）
 
-- [ ] 每位成员的 bot 凭据与 Hermes profile **一一对应**，由一位**非开发者家人**确认过一次
-- [ ] 每个 profile 的 family token 属于**正确的人**，且 `X-Family-Member` 声明头**同时配好**（S7 已实测：缺声明头 → `DENIED(identity_mismatch)`）
-- [ ] **Hermes 侧 DM allowlist / pairing 已显式配置**（不得依赖默认值：微信 `dm_policy` 的平台默认是 `open`），逐个确认家人能进、外人进不来
-- [ ] 每个 profile 的群策略为 `disabled`，**bot 没有被拉进任何群**
-- [ ] 家人通道的工具面已**收窄到 family 工具集 + 必要只读工具**
-- [ ] cron job 都建在**对应成员自己的 profile** 下（`profiles/<name>/cron/jobs.json`），没有跨 profile 共用
-- [ ] cron 侧 family 工具集已启用（job 的 `enabled_toolsets` 或 `hermes tools` 的 cron 平台），且 `deliver` 写成 `platform:chat_id` 形式
-- [ ] `docs/hermes-skill.md` 已装进每个 profile 的 skill store，内容一致且**不含任何身份信息**
-- [ ] S5（越权删除）在完整实现上复跑一次——Spike 只覆盖 todo 域，日程/记账域上线前各补一次
+> 2026-10-05 状态：**代码侧能验的都已实测**（标注 ✅ 的项都有本轮实测证据）；标 ⏳ 的项需要**真实 bot 凭据**，属 R10，绕不开人。
+> 证据与探针脚本在 `~/artifacts/scripts/`（`fa-verify-*.mjs` / `fa-s7-e2e.sh` / `fa-dump-cron-session.py`）。
+
+- [ ] ⏳ 每位成员的 bot 凭据与 Hermes profile **一一对应**，由一位**非开发者家人**确认过一次（需 R10 的真实凭据）
+- [x] ✅ 每个 profile 的 family token 属于**正确的人**，且 `X-Family-Member` 声明头**同时配好**（实测：缺声明头 → `DENIED(identity_mismatch)`；错声明头 → 同样拒绝；声明头值须是成员 id）
+- [ ] ⏳ **Hermes 侧 DM allowlist / pairing 已显式配置**（不得依赖默认值：微信 `dm_policy` 的平台默认是 `open`），逐个确认家人能进、外人进不来
+- [ ] ⏳ 每个 profile 的群策略为 `disabled`，**bot 没有被拉进任何群**
+- [x] ✅ 家人通道的工具面已**收窄到 family 工具集**（实测：`-t family` 是正确写法；带 `terminal`/`file`/`code_execution` 时模型会去读 token 明文、改库、重启服务端——已在 `docs/实施计划.md` 与 skill 里记为部署纪律）
+- [x] ✅ cron job 都建在**对应成员自己的 profile** 下（实测：cron 会话身份自动正确，prompt 里不含任何身份）
+- [x] ✅ cron 侧 family 工具集可用（实测 cron 会话直接调到 `mcp__family__get_today`）；`deliver` 在真实部署时须写成 `platform:chat_id` 形式（本地验证用 `local` 避免误推）
+- [x] ✅ `docs/hermes-skill.md` 已装进每个 profile 的 skill store，内容一致且**不含任何身份信息**（v4，对应 20 个工具）
+- [x] ✅ S5（越权删除）在完整实现上复跑过：`test/visibility.test.ts` 的 X1–X16 + 三张真值表逐格断言（S5 阶段），并有独立 HTTP 探针复验
+
 
 ## 未验证假设（本轮必须实测确认）
 
