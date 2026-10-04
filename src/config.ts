@@ -4,11 +4,25 @@ import { z } from "zod";
  * 服务端配置。来源:环境变量(均带默认值)。
  * 时区必须显式配置(设计方案 §4):实现不得依赖系统本地时区,
  * 否则容器默认 UTC 会让"今天""本周"整体偏移一天。
+ *
+ * 两个 HTTP 门面**各绑各的地址**(设计方案 §2):/mcp 永远只绑回环;
+ * 查看页绑局域网网卡,但**缺省同样是回环**(FA_WEB_HOST),即"缺省不对外"。
  */
 export interface AppConfig {
   /** MCP 端点绑定地址:只绑回环(D2) */
   mcpHost: string;
   mcpPort: number;
+  /**
+   * 查看页绑定地址(§6)。
+   *
+   * **缺省 127.0.0.1 = 缺省不对外**:同机部署时查看页没有任何对外的理由,
+   * 所以"忘了配"的后果必须是"打不开",而不是"把家庭数据挂到整个局域网"。
+   * 要让家人手机访问,必须**显式**设成局域网网卡地址(如 192.168.1.23);
+   * 设成 0.0.0.0 会连所有网卡一起暴露,不建议。
+   */
+  webHost: string;
+  /** 查看页端口(缺省 8348,与 /mcp 的 8347 分开,两个门面互不影响)。 */
+  webPort: number;
   /** SQLite 数据库文件路径 */
   dbPath: string;
   /** 家庭固定单时区(IANA 名称) */
@@ -50,6 +64,8 @@ const boolEnv = z
 const envSchema = z.object({
   FA_MCP_HOST: z.string().min(1).default("127.0.0.1"),
   FA_MCP_PORT: z.coerce.number().int().positive().default(8347),
+  FA_WEB_HOST: z.string().min(1).default("127.0.0.1"),
+  FA_WEB_PORT: z.coerce.number().int().positive().default(8348),
   FA_DB_PATH: z.string().min(1).default("data/family-assistant.db"),
   FA_TIMEZONE: z.string().min(1).default("Asia/Shanghai"),
   FA_IDENTITY_HEADER: z.string().min(1).default("x-family-member"),
@@ -83,6 +99,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     mcpHost: e.FA_MCP_HOST,
     mcpPort: e.FA_MCP_PORT,
+    webHost: e.FA_WEB_HOST,
+    webPort: e.FA_WEB_PORT,
     dbPath: e.FA_DB_PATH,
     timezone: e.FA_TIMEZONE,
     identityHeader: e.FA_IDENTITY_HEADER.toLowerCase(),

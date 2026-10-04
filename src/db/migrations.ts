@@ -6,6 +6,7 @@ import type { Db } from "./db.js";
  * 不回填改写 v1——既有库上跑 migrate() 即叠加。
  * v3(S2b)只**追加约束**:event_instance 的 UNIQUE(series_id, start),
  * 给重复日程的惰性续期兜底幂等(表结构本身不变,既有库叠加即可)。
+ * v4(S6)加 setting 表:查看页会话 cookie 的签名密钥存库(不写死在代码里)。
  */
 const MIGRATIONS: readonly { id: number; name: string; sql: string }[] = [
   {
@@ -161,6 +162,27 @@ const MIGRATIONS: readonly { id: number; name: string; sql: string }[] = [
       -- 配合 INSERT OR IGNORE:重名是**跳过**而不是抛错 —— 读路径上的写一旦抛错就变成
       -- 降级返回,不该由一条内部约束去触发它。
       CREATE UNIQUE INDEX idx_event_instance_series_start ON event_instance(series_id, start);
+    `,
+  },
+  {
+    id: 4,
+    name: "setting(key, value): 服务端键值设置(查看页会话签名密钥)",
+    sql: `
+      -- 服务端键值设置(设计方案 §6)。
+      --
+      -- 用途只有一个:查看页会话 cookie 的**签名密钥**。密钥必须**存库**而不是写死在代码里,
+      -- 原因有三,按重要性排:
+      --   ① 写死 = 所有部署共用同一个密钥,一份代码泄露即全家会话都可伪造;
+      --   ② 写死 = 重启后会话全部失效(除非密钥恰好不变),而"重启要重新登录"对家人是无声的故障;
+      --   ③ 存库 = 可以随时轮换(删掉这一行,下次启动重新生成)。
+      -- 首次启动随机生成写入(见 src/web/auth.ts 的 sessionSecret)。
+      --
+      -- 通用键值表而不是专用表:这类"服务端自己用、家人看不见"的键值还会有,
+      -- 一张 setting 表比每来一个就建一张表省事,也不进业务 schema 的讨论范围。
+      CREATE TABLE setting (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `,
   },
 ];

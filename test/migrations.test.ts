@@ -10,6 +10,7 @@ import { migrate } from "../src/db/migrations.js";
  * 迁移 v2(设计方案 §4):event_series / event_instance / entry / category / audit_log
  * 一次建全,并在既有 v1 库上可叠加(不改 v1)。
  * v3(S2b):给 event_instance 追加 UNIQUE(series_id, start) —— 重复日程惰性续期的幂等保证。
+ * v4(S6):setting 表 —— 查看页会话 cookie 的签名密钥存库(不写死在代码里)。
  */
 
 function tableNames(db: Db): string[] {
@@ -29,17 +30,42 @@ function withTempDb(fn: (db: Db) => void): void {
 }
 
 describe("迁移 v2:全量 schema", () => {
-  it("建库后 schema_migrations 有 v1、v2、v3 三条,各表都在", () => {
+  it("建库后 schema_migrations 有 v1–v4 四条,各表都在", () => {
     const db = openDb(":memory:");
     migrate(db);
     const applied = db.prepare("SELECT id, name FROM schema_migrations ORDER BY id").all() as {
       id: number;
       name: string;
     }[];
-    assert.deepEqual(applied.map((r) => r.id), [1, 2, 3]);
-    for (const t of ["member", "api_token", "todo", "category", "entry", "event_series", "event_instance", "audit_log"]) {
+    assert.deepEqual(applied.map((r) => r.id), [1, 2, 3, 4]);
+    for (const t of [
+      "member",
+      "api_token",
+      "todo",
+      "category",
+      "entry",
+      "event_series",
+      "event_instance",
+      "audit_log",
+      "setting",
+    ]) {
       assert.ok(tableNames(db).includes(t), `缺表 ${t}`);
     }
+    db.close();
+  });
+
+  it("v4:setting 表只有 key/value 两列,值 NOT NULL,重复 key 冲突由主键挡住", () => {
+    const db = openDb(":memory:");
+    migrate(db);
+    const cols = db.prepare("PRAGMA table_info(setting)").all() as { name: string; notnull: number; pk: number }[];
+    assert.deepEqual(
+      cols.map((c) => c.name),
+      ["key", "value"],
+    );
+    assert.equal(cols[1]!.notnull, 1, "value 必须 NOT NULL(密钥不允许为空)");
+    assert.equal(cols[0]!.pk, 1, "key 必须是主键");
+    db.prepare("INSERT INTO setting (key, value) VALUES ('k', 'v')").run();
+    assert.throws(() => db.prepare("INSERT INTO setting (key, value) VALUES ('k', 'w')").run(), /UNIQUE/);
     db.close();
   });
 
@@ -197,24 +223,25 @@ describe("迁移:既有库上可叠加(不改 v1)", () => {
       migrate(db);
       migrate(db);
       const applied = db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as { n: number };
-      assert.equal(applied.n, 3);
+      assert.equal(applied.n, 4);
       const cats = db.prepare("SELECT COUNT(*) AS n FROM category").get() as { n: number };
       assert.equal(cats.n, 13);
     });
   });
 
-  it("v1 已应用的库再跑 migrate() → 只叠加 v2 + v3", () => {
+  it("v1 已应用的库再跑 migrate() → 只叠加 v2 + v3 + v4", () => {
     withTempDb((db) => {
-      // 造一个"只有 v1"的库:跑一次迁移后把 v2/v3 的痕迹撤掉
+      // 造一个"只有 v1"的库:跑一次迁移后把 v2/v3/v4 的痕迹撤掉
       // (DROP TABLE 会连带删掉 v3 建在 event_instance 上的索引,所以两条痕迹都要撤)
       migrate(db);
       db.exec(`
+        DROP TABLE setting;
         DROP TABLE audit_log;
         DROP TABLE event_instance;
         DROP TABLE event_series;
         DROP TABLE entry;
         DROP TABLE category;
-        DELETE FROM schema_migrations WHERE id IN (2, 3);
+        DELETE FROM schema_migrations WHERE id IN (2, 3, 4);
       `);
       // v1 的数据必须完好
       db.prepare("INSERT INTO member (id, name, aliases, created_at) VALUES ('m-1', '妈妈', '[]', '2026-10-04T00:00:00Z')").run();
@@ -223,7 +250,7 @@ describe("迁移:既有库上可叠加(不改 v1)", () => {
       migrate(db);
 
       const applied = db.prepare("SELECT id FROM schema_migrations ORDER BY id").all() as { id: number }[];
-      assert.deepEqual(applied.map((r) => r.id), [1, 2, 3]);
+      assert.deepEqual(applied.map((r) => r.id), [1, 2, 3, 4]);
       const todo = db.prepare("SELECT title FROM todo WHERE id = 't-1'").get() as { title: string };
       assert.equal(todo.title, "交电费", "v1 的数据不能在迁移中被动到");
       const cats = db.prepare("SELECT COUNT(*) AS n FROM category").get() as { n: number };

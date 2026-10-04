@@ -54,18 +54,48 @@ mcp_servers:
 |---|---|---|
 | `FA_MCP_HOST` | `127.0.0.1` | MCP 端点绑定地址(必须保持回环,D2) |
 | `FA_MCP_PORT` | `8347` | MCP 端点端口 |
+| `FA_WEB_HOST` | `127.0.0.1` | **查看页**绑定地址。**缺省即不对外**:同机部署时查看页没有对外的理由,"忘了配"的后果必须是"手机打不开",而不是把家庭数据挂到整个局域网。要让家人手机访问,显式设成局域网网卡地址(如 `FA_WEB_HOST=192.168.1.23`);设 `0.0.0.0` 会连所有网卡一起暴露 |
+| `FA_WEB_PORT` | `8348` | 查看页端口(与 `/mcp` 的 8347 分开,两个门面互不影响) |
 | `FA_DB_PATH` | `data/family-assistant.db` | SQLite 文件(WAL 模式) |
 | `FA_TIMEZONE` | `Asia/Shanghai` | 家庭固定单时区;"今天/逾期"全部由此计算 |
 | `FA_IDENTITY_HEADER` | `x-family-member` | 身份声明头的头名 |
 | `FA_REQUIRE_IDENTITY_HEADER` | `true` | 身份声明头是否必填。**保持 true**;置 `0/false` 只为过渡期旧部署,会把 B1(漏写声明头 → 静默串号)重新打开 |
+| `FA_LOG_LEVEL` | `info` | Fastify 日志级别。cookie 与口令字段已 redact,不进日志 |
 
-### 管理(CLI,管理页属后续版本)
+### 查看页(成员登录 + 三个只读页面)
+
+同一进程两个门面(设计 §2):`/mcp` 仍只绑回环,查看页绑 `FA_WEB_HOST`。
 
 ```bash
-npm run admin -- member list                 # 成员列表
-npm run admin -- member remove 妈妈          # 软删(名下数据保留,其 token 一并失效)
-npm run admin -- token list                  # token 元数据(只显示哈希后状态)
-npm run admin -- token revoke tok_xxx        # 吊销
+npm run admin -- member set-password 妈妈          # 随机口令,明文只显示一次
+FA_WEB_HOST=192.168.1.23 npm start                 # 显式绑局域网网卡,家人手机才能访问
+npm run admin -- member clear-password 妈妈        # 清除口令:该成员无法登录,已有会话一并失效
+```
+
+| 路径 | 内容 |
+|---|---|
+| `GET /login` | 选成员 + 个人口令。**没有默认口令**,没设过口令的成员登录时得到"请让管理员先设置你的查看页密码" |
+| `POST /logout` | 退出(清 cookie)。**用 POST 而不是 GET**,免得点个链接就被登出 |
+| `GET /todos` | **仅本人**待办(V1),分未完成/已完成,顶部一块「今天」(截止说法复用 `describeDue`) |
+| `GET /calendar` | 全家日程 + 本人个人日程;**他人个人日程不可见**。缺省窗口 = 本周(周一起 7 天),`?start=&end=` 可改 |
+| `GET /ledger` | 缺省**共享账本**(全员可见);`?ledger=personal` 切到**我的个人账本**;`?member=` 是**归属人筛选**。**他人个人账本不可见、也没有切换入口**,硬塞 `?ledger=personal&member=他人` 得到明确的未授权提示(403 语义,**绝不静默显示空表**) |
+| `GET /healthz` | 存活探测:**免登录**,返回 JSON(进程、DB 是否可读、服务端时间),**不含任何成员数据** |
+
+**可见性与 MCP 侧同源**:页面不重写 V1–V9。它用登录态造出统一的 `viewer = { memberId, memberName, source: "web" }`,然后**直接调用域函数** `getToday` / `listTodos` / `listEvents` / `listEntries` / `summarizeEntries`(`src/web/pages.ts`),可见范围完全由 domain 层的同一套过滤层判定。页面层零 SQL(`src/web/pages.ts` 里没有一条 `prepare(`);`test/web.test.ts` 用「页面渲染的条目 id 集合 == 直接调 domain 返回的集合」逐条断言这一点。
+
+**加固**:口令用 `node:crypto` 的 **scrypt** 哈希(`N=16384, r=8, p=1, keylen=32`,每个口令一份 16 字节随机盐,参数随哈希一起存);会话是签名 cookie(`HttpOnly` + `SameSite=Lax` + `Path=/`,内容为 `成员id.过期时刻.HMAC-SHA256`,**签名密钥存库**的 `setting` 表、首次启动随机生成);登录失败按「来源 IP + 成员」计数,**连续 5 次失败锁定 15 分钟**(话术说明还需等多久),**成功登录清零**;所有输出做 HTML 转义(标题/备注里可能出现 `<script>`);未登录访问受保护页面 → **302 到 `/login`**(登录后回跳原路径);页面**只读**,一切写操作走对话。
+
+> **R9 的已知代价:局域网内没有 HTTPS,口令以明文经过 Wi-Fi。** 这是家庭自托管明确接受的代价(设计 §10):换来的边界是"防误用与防越权诱导,不防已经拿到凭据的人"。因此页面只绑局域网网卡(`FA_WEB_HOST`)、强制非默认口令、登录限速,并且**不要把口令写进日志**。cookie 上没有 `Secure` 属性正是这个原因(加了浏览器直接不发 cookie)。
+
+### 管理(CLI;管理页属 S6b)
+
+```bash
+npm run admin -- member list                                  # 成员列表(含查看页口令状态)
+npm run admin -- member remove 妈妈                            # 软删(名下数据保留,其 token 一并失效)
+npm run admin -- member set-password 妈妈 [--password <明文>]   # 设置查看页口令(不给 --password 则随机生成,只显示一次)
+npm run admin -- member clear-password 妈妈                    # 清除查看页口令
+npm run admin -- token list                                   # token 元数据(只显示哈希后状态)
+npm run admin -- token revoke tok_xxx                         # 吊销
 ```
 
 ## 测试

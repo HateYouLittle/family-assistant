@@ -21,6 +21,10 @@ const IDENTITY_HEADER = "x-family-member";
 const config: AppConfig = {
   mcpHost: "127.0.0.1",
   mcpPort: 0, // listen 时用 0 = 随机端口
+  // 查看页的绑定地址在这里无关紧要(本用例只连 /mcp);显式写成回环是为了
+  // 顺带说明"两个门面各绑各的,配查看页不影响 /mcp"。缺省值同样是 127.0.0.1。
+  webHost: "127.0.0.1",
+  webPort: 0,
   dbPath: ":memory:",
   timezone: "Asia/Shanghai",
   identityHeader: IDENTITY_HEADER,
