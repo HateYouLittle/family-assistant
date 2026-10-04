@@ -29,11 +29,17 @@ describe("工具面 golden(P8)", () => {
     }
   });
 
-  it("Spike 01 范围:恰好 4 个工具,无任何身份参数形态", () => {
-    assert.deepEqual(
-      TOOL_DEFINITIONS.map((t) => t.name),
-      ["list_members", "add_todo", "list_todos", "complete_todo"],
-    );
+  it("S1 范围:恰好 8 个工具(4 个原有 + 4 个写工具),无任何身份参数形态", () => {
+    assert.deepEqual(TOOL_DEFINITIONS.map((t) => t.name), [
+      "list_members",
+      "add_todo",
+      "list_todos",
+      "update_todo",
+      "complete_todo",
+      "reopen_todo",
+      "delete_todo",
+      "restore_deleted",
+    ]);
     for (const t of TOOL_DEFINITIONS) {
       const props = (t.inputSchema.properties ?? {}) as Record<string, unknown>;
       for (const banned of ["as_member", "asMember", "bind_key", "bindKey", "speaker", "caller"]) {
@@ -52,6 +58,19 @@ describe("工具面 golden(P8)", () => {
     assert.match(TOOL_DEFINITIONS[2]!.description, /INVALID_PARAMS/);
     assert.match(TOOL_DEFINITIONS[2]!.description, /互相不可见/);
     assert.match(TOOL_DEFINITIONS[3]!.description, /DENIED/);
+  });
+
+  it("P8 ④:不可变字段的拒绝条件写进 description(V7 固定话术)", () => {
+    const update = TOOL_DEFINITIONS.find((t) => t.name === "update_todo");
+    assert.ok(update, "缺少 update_todo");
+    assert.match(update!.description, /归属\/账本不可修改,如需变更请删除后重建/);
+    assert.match(update!.description, /immutable/);
+    // S1 的三个新写工具也必须把拒绝条件写出来(P8 ②)
+    for (const name of ["reopen_todo", "delete_todo", "restore_deleted"]) {
+      const t = TOOL_DEFINITIONS.find((x) => x.name === name);
+      assert.ok(t, `缺少 ${name}`);
+      assert.match(t!.description, /DENIED/, `${name} 的 description 未写明拒绝条件`);
+    }
   });
 
   it("所有 schema 均 additionalProperties:false(strict)", () => {

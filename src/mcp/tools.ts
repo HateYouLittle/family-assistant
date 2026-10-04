@@ -4,20 +4,25 @@ import { recordAudit } from "../audit/audit.js";
 import type { Db } from "../db/db.js";
 import type { Envelope } from "../domain/envelope.js";
 import { listMembersEnvelope } from "../domain/members.js";
-import { addTodo, completeTodo, listTodos } from "../domain/todos.js";
+import { restoreDeleted } from "../domain/restore.js";
+import { addTodo, completeTodo, deleteTodo, listTodos, reopenTodo, updateTodo } from "../domain/todos.js";
 import type { Viewer } from "../domain/viewer.js";
 import {
   addTodoSchema,
   completeTodoSchema,
+  deleteTodoSchema,
   listMembersSchema,
   listTodosSchema,
   parseToolArgs,
+  reopenTodoSchema,
+  restoreDeletedSchema,
+  updateTodoSchema,
 } from "./schemas.js";
 
 /**
- * 工具面(Spike 01 范围:list_members / add_todo / list_todos / complete_todo)。
- * description 即契约(P8):中文、显式写出拒绝条件、给一个正确示例、
- * 并声明"说话人不是参数"。description 与 schema 变更同等对待,走 golden 测试。
+ * 工具面(S1:list_members + 待办域 6 个 + restore_deleted = 8 个;
+ * 日程/记账域在 S2/S3 接入)。description 即契约(P8):中文、显式写出拒绝条件、
+ * 给一个正确示例、并声明"说话人不是参数"。description 与 schema 变更同等对待,走 golden 测试。
  *
  * 工具层保持薄壳:参数转换 + 话术拼装之外的规则全部在 domain 层。
  * 说话人以 Viewer 形态从上层传进来(连接身份),工具面没有身份参数、也不感知身份。
@@ -114,6 +119,22 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     run: (db, viewer, tz, args) => listTodos(db, viewer, tz, args),
   }),
   defineTool({
+    name: "update_todo",
+    description:
+      "修改一条待办的标题、备注、截止日期。必须先 list_todos 拿到精确 id,程序不接受模糊指定。" +
+      "置空语义:字段缺省=不改动;显式传 null=清空(due_date=null 去掉截止日期、notes=null 清空备注)。" +
+      "仅限本人待办:改他人(含你代记给他人的)待办返回 DENIED——代记的条目只能由归属人本人改,原因原样转述,不要重试。" +
+      "不接受 done:完成用 complete_todo、取消完成用 reopen_todo,传 done 会按未知参数被拒(INVALID_PARAMS)。" +
+      "owner(归属)不可修改:与现值相同的值(成员名/别名/成员 id 都算)幂等放行,供读-改-写时原样回传;" +
+      "与现值不同则返回 DENIED(reason=immutable)——归属/账本不可修改,如需变更请删除后重建(用 delete_todo + add_todo)。" +
+      '示例:update_todo(id="t-261004-a7k3", due_date=null)。' +
+      "注意:说话人由连接确定,本工具没有、也不接受任何身份参数(as_member 之类会被拒绝)。",
+    schema: updateTodoSchema,
+    // 审计只留关键字段:notes 是自由文本,按设计 §6 不入审计。
+    audit: (args) => summarizeArgs(args as Record<string, unknown>, ["id", "title", "due_date", "owner"]),
+    run: (db, viewer, tz, args) => updateTodo(db, viewer, tz, args),
+  }),
+  defineTool({
     name: "complete_todo",
     description:
       "完成一条待办。必须先 list_todos 拿到精确 id,程序不接受模糊指定。" +
@@ -124,5 +145,48 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     schema: completeTodoSchema,
     audit: (args) => summarizeArgs(args as Record<string, unknown>, ["id"]),
     run: (db, viewer, tz, args) => completeTodo(db, viewer, tz, (args as { id: string }).id),
+  }),
+  defineTool({
+    name: "reopen_todo",
+    description:
+      "把一条已完成的待办重新打开(取消完成)。必须先 list_todos 拿到精确 id。" +
+      "仅限本人待办:重开他人的待办返回 DENIED(not_visible);重开你代记给他人的待办返回 DENIED(not_writable)——" +
+      "那是 TA 自己的完成状态,只能由 TA 本人重开,原因原样转述即可,不要重试。" +
+      "对本来就未完成的待办重复调用无副作用(不会改动完成时间)。" +
+      "注意:说话人由连接确定,本工具没有、也不接受任何身份参数。" +
+      '示例:reopen_todo(id="t-261004-a7k3")。',
+    schema: reopenTodoSchema,
+    audit: (args) => summarizeArgs(args as Record<string, unknown>, ["id"]),
+    run: (db, viewer, _tz, args) => reopenTodo(db, viewer, (args as { id: string }).id),
+  }),
+  defineTool({
+    name: "delete_todo",
+    description:
+      "删除一条待办(软删,可恢复)。必须先 list_todos 拿到精确 id,程序永远不接受模糊删除。" +
+      "权限:本人的待办随时可删;你代他人记的待办也可撤回(回执会说明「已撤回你代记的条目」);" +
+      "别人的待办一律 DENIED(not_visible),原样转述、不要重试。" +
+      "删除是软删:条目不再出现在 list_todos 里,误删可用 restore_deleted(kind=\"todo\", id=...) 找回。" +
+      "注意:说话人由连接确定,本工具没有、也不接受任何身份参数。" +
+      '示例:delete_todo(id="t-261004-a7k3")。',
+    schema: deleteTodoSchema,
+    audit: (args) => summarizeArgs(args as Record<string, unknown>, ["id"]),
+    run: (db, viewer, _tz, args) => deleteTodo(db, viewer, (args as { id: string }).id),
+  }),
+  defineTool({
+    name: "restore_deleted",
+    description:
+      "恢复一条被删除的记录(删除是软删,所以误删都能找回)。必须带精确 id,程序不接受模糊恢复。" +
+      "kind 本阶段只支持 \"todo\"(日程与记账域接入后再扩展该枚举),传其他值返回 INVALID_PARAMS。" +
+      "权限与删除同源:本人的待办本人可恢复;你代他人记的待办你也能恢复(否则代记者删了却救不回来);" +
+      "别人的条目返回 DENIED(not_visible),原样转述、不要重试。" +
+      "对未被删除的 id 重复调用无副作用(回执会说明无需恢复)。" +
+      "注意:说话人由连接确定,本工具没有、也不接受任何身份参数。" +
+      '示例:restore_deleted(kind="todo", id="t-261004-a7k3")。',
+    schema: restoreDeletedSchema,
+    audit: (args) => summarizeArgs(args as Record<string, unknown>, ["kind", "id"]),
+    run: (db, viewer, _tz, args) => {
+      const a = args as { kind: string; id: string };
+      return restoreDeleted(db, viewer, a.kind, a.id);
+    },
   }),
 ];

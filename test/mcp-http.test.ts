@@ -76,14 +76,31 @@ function envelopeOf(result: unknown): { envelope: Record<string, unknown>; isErr
 }
 
 describe("MCP HTTP 端到端", () => {
-  it("有效 token:tools/list 暴露 4 个工具;list_members 走通", async () => {
+  it("有效 token:tools/list 暴露 8 个工具(含 S1 新增 4 个写工具);list_members 走通", async () => {
     const client = await connect(authHeaders(mama, tokenMama));
     try {
       const tools = await client.listTools();
+      assert.equal(tools.tools.length, 8);
       assert.deepEqual(
         tools.tools.map((t) => t.name).sort(),
-        ["add_todo", "complete_todo", "list_members", "list_todos"],
+        [
+          "add_todo",
+          "complete_todo",
+          "delete_todo",
+          "list_members",
+          "list_todos",
+          "reopen_todo",
+          "restore_deleted",
+          "update_todo",
+        ],
       );
+      // S1 的 4 个新写工具确实在工具面里(不靠"数量对得上"蒙混)
+      for (const name of ["update_todo", "reopen_todo", "delete_todo", "restore_deleted"]) {
+        assert.ok(
+          tools.tools.some((t) => t.name === name),
+          `tools/list 缺少 ${name}`,
+        );
+      }
       const res = await client.callTool({ name: "list_members", arguments: {} });
       const { envelope, isError } = envelopeOf(res);
       assert.equal(isError, false);
@@ -179,7 +196,22 @@ describe("MCP HTTP 端到端", () => {
   it("B1:缺声明头时 tools/list 仍可列工具,但任何调用都被拒(工具面不含身份信息)", async () => {
     const client = await connect({ Authorization: `Bearer ${tokenBaba}` });
     try {
-      assert.equal((await client.listTools()).tools.length, 4);
+      const listed = (await client.listTools()).tools;
+      assert.equal(listed.length, 8);
+      // 工具面不含身份信息:未带声明头也照样能列全 8 个工具
+      assert.deepEqual(
+        listed.map((t) => t.name).sort(),
+        [
+          "add_todo",
+          "complete_todo",
+          "delete_todo",
+          "list_members",
+          "list_todos",
+          "reopen_todo",
+          "restore_deleted",
+          "update_todo",
+        ],
+      );
       const res = await client.callTool({ name: "add_todo", arguments: { title: "不该被记下" } });
       const { envelope, isError } = envelopeOf(res);
       assert.equal(isError, true);

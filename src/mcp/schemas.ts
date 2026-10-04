@@ -43,10 +43,62 @@ export const completeTodoSchema = z.strictObject({
   id: z.string().min(1).max(40).describe("待办 id,从 list_todos 的结果里原样复制,不要凭记忆转述。"),
 });
 
+export const updateTodoSchema = z.strictObject({
+  id: z.string().min(1).max(40).describe("待办 id,从 list_todos 的结果里原样复制。"),
+  title: z
+    .string()
+    .trim()
+    .min(1, "title 不能为空")
+    .max(200, "title 过长(上限 200 字)")
+    .optional()
+    .describe("新标题。缺省 = 不改动。"),
+  notes: z
+    .string()
+    .max(2000, "notes 过长(上限 2000 字)")
+    .nullable()
+    .optional()
+    .describe("新备注。缺省 = 不改动;传 null = 清空备注。"),
+  due_date: dateString("due_date")
+    .nullable()
+    .optional()
+    .describe("新截止日期 YYYY-MM-DD。缺省 = 不改动;传 null = 去掉截止日期。"),
+  owner: z
+    .string()
+    .min(1, "owner 不能为空")
+    .max(100)
+    .optional()
+    .describe(
+      "归属人:仅供读-改-写时原样回传。缺省 = 不传;" +
+        "与现值相同(含别名/成员 id)幂等放行,与现值不同 → DENIED(immutable):归属不可修改,如需变更请删除后重建。" +
+        "本工具不接受 done(完成用 complete_todo、取消完成用 reopen_todo)。",
+    ),
+});
+
+export const reopenTodoSchema = z.strictObject({
+  id: z.string().min(1).max(40).describe("待办 id,从 list_todos 的结果里原样复制。"),
+});
+
+export const deleteTodoSchema = z.strictObject({
+  id: z.string().min(1).max(40).describe("待办 id,从 list_todos 的结果里原样复制。软删,可恢复。"),
+});
+
+export const restoreDeletedSchema = z.strictObject({
+  kind: z.enum(["todo"], {
+    errorMap: () => ({
+      message: `kind 本阶段只支持 "todo"(日程/记账域接入后再扩展);收到的是非 todo 的值`,
+    }),
+  }).describe('要恢复的记录类型,本阶段仅 "todo"。'),
+  id: z.string().min(1).max(40).describe("待办 id,原样使用 delete_todo 回执里的 id。"),
+});
+
 export type ListMembersArgs = z.infer<typeof listMembersSchema>;
 export type AddTodoArgs = z.infer<typeof addTodoSchema>;
 export type ListTodosArgs = z.infer<typeof listTodosSchema>;
 export type CompleteTodoArgs = z.infer<typeof completeTodoSchema>;
+export type UpdateTodoArgs = z.infer<typeof updateTodoSchema>;
+export type ReopenTodoArgs = z.infer<typeof reopenTodoSchema>;
+export type DeleteTodoArgs = z.infer<typeof deleteTodoSchema>;
+export type RestoreDeletedArgs = z.infer<typeof restoreDeletedSchema>;
 
 const IDENTITY_PARAM_HINT = "说话人由连接确定,本工具没有、也不接受任何身份参数。";
 

@@ -1,6 +1,6 @@
 import type { Db } from "../db/db.js";
 import { daysBetween, generateId, todayInTz } from "../db/id.js";
-import { failEnvelope, okEnvelope, type Envelope } from "./envelope.js";
+import { failEnvelope, okEnvelope, type Envelope, type FailEnvelope } from "./envelope.js";
 import { resolveMemberOrEnvelope } from "./members.js";
 import type { Caller } from "./viewer.js";
 
@@ -10,6 +10,7 @@ import type { Caller } from "./viewer.js";
  * - V3/V6 仅本人可改删完成;
  * - V4 可代记(owner ≠ 说话人),回执由服务端标注"仅 TA 可见,由 <说话人> 代记";
  * - V8 代记者保留查看权与删除权、无修改/完成权;
+ * - V7 归属(todo.owner_id)写入后不可变,update 传入不同值 → DENIED(immutable);
  * - 说话人来自连接(Caller,见 ./viewer.ts),工具面没有身份参数(P7/D13)。
  */
 
@@ -28,6 +29,12 @@ export interface TodoView {
   delegated: boolean;
   created_at: string;
 }
+
+/**
+ * delete_todo / restore_deleted 的回执 data:在 TodoView 之外补上 deleted_at,
+ * 让 Agent 一眼看出这条当前是"已删"还是"已恢复"(不删不能删的字段不加)。
+ */
+export type TodoMutationView = TodoView & { deleted_at: string | null };
 
 interface TodoJoinRow {
   id: string;
@@ -182,37 +189,270 @@ export function listTodos(db: Db, caller: Caller, timezone: string, input: ListT
   return okEnvelope({ todos: own, delegated }, parts.join("。") + "。");
 }
 
-export function completeTodo(db: Db, caller: Caller, timezone: string, id: string): Envelope {
-  const row = db.prepare(`${SELECT_TODO} WHERE t.id = ? AND t.deleted_at IS NULL`).get(id) as TodoJoinRow | undefined;
-  if (!row) {
-    return failEnvelope("NOT_FOUND", {
-      message: `没有找到这条待办(${id}),可能已被删除。`,
-      id,
-      hint: "先调 list_todos 拿到当前有效的精确 id 再操作。",
-    });
-  }
-  const view = toView(row);
-  if (view.owner_id === caller.memberId) {
-    if (view.done) {
-      return okEnvelope(view, "该待办已完成,无需重复操作。");
-    }
-    const now = new Date().toISOString();
-    db.prepare("UPDATE todo SET done = 1, done_at = ? WHERE id = ?").run(now, id);
-    const updated = db.prepare(`${SELECT_TODO} WHERE t.id = ?`).get(id) as TodoJoinRow;
-    return okEnvelope(toView(updated), `已完成待办 [${id}]:${view.title}。`);
-  }
-  // V8:代记者可看可删,但不能替归属人完成。
-  if (view.created_by === caller.memberId) {
-    return failEnvelope("DENIED", {
-      reason: "not_writable",
-      message: `这条待办是你代 ${view.owner_name} 记的,只能由 ${view.owner_name} 本人完成。`,
-      hint: `向用户说明:代记的条目仅归属人本人可以完成。`,
-    });
-  }
-  // V3/V6:他人的待办根本不可见(存在性也不必隐瞒成 NOT_FOUND,X4 规定明确拒绝)。
+// ─────────────────────────── 写路径共用:取行 / 拒绝 / 话术 ───────────────────────────
+
+/** 取行(含已删):只有 restore_deleted 需要看到已删的行。 */
+function loadTodo(db: Db, id: string): TodoJoinRow | undefined {
+  return db.prepare(`${SELECT_TODO} WHERE t.id = ?`).get(id) as TodoJoinRow | undefined;
+}
+
+/** 行根本不存在 → NOT_FOUND(P5:删除/修改必须带精确 id,先 list 拿)。 */
+function todoMissing(id: string, action: string): FailEnvelope {
+  return failEnvelope("NOT_FOUND", {
+    message: `没有找到这条待办(${id}),无法${action}。`,
+    id,
+    hint: "先调 list_todos 拿到当前有效的精确 id 再操作(不要凭记忆转述 id)。",
+  });
+}
+
+/** 行存在但已软删 → 同样按 NOT_FOUND(§4:已删即不在可见范围),但要给出恢复出路。 */
+function todoAlreadyDeleted(id: string, action: string): FailEnvelope {
+  return failEnvelope("NOT_FOUND", {
+    message: `待办 [${id}] 已被删除,无法${action}。`,
+    id,
+    hint: `已删除的条目不再出现在 list_todos 里;若要找回,用 restore_deleted(kind="todo", id="${id}")。`,
+  });
+}
+
+/**
+ * update/reopen/complete/delete 的统一取行。
+ *
+ * **判定顺序本身是可见性纪律的一部分**(S1c 修复轮):先答"你看得见这条吗",
+ * 再答"它删没删过"。反过来就等于先给信息、后判权限——第三人拿别人的 id 试探,
+ * 会读到"这条待办已被删除"外加一条现成的 restore_deleted 命令,而**同一条待办在
+ * 未删状态下回的是 DENIED(not_visible)**:判定口径随 deleted_at 漂移,这本身就是泄露(V5)。
+ *
+ * 顺序:行不存在 → NOT_FOUND;看不见 → DENIED(not_visible);已软删 → NOT_FOUND(§4)。
+ * V8 的 not_writable 交给各写函数自己判(见 denyIfNotOwner),因为它要按 action 措辞。
+ * 返回 `{ row }` 可继续,返回 `{ envelope }` 直接回给调用方。
+ */
+function loadWritableTodo(
+  db: Db,
+  caller: Caller,
+  id: string,
+  action: string,
+): { row: TodoJoinRow } | { envelope: FailEnvelope } {
+  const row = loadTodo(db, id);
+  if (!row) return { envelope: todoMissing(id, action) };
+  // 可见性先于行内信息:能不能看这条,与它删没删过无关(V1 + V8 的查看权)。
+  if (!canSeeTodo(toView(row), caller)) return { envelope: denyNotVisible() };
+  if (row.deleted_at !== null) return { envelope: todoAlreadyDeleted(id, action) };
+  return { row };
+}
+
+/** V3/V6:条目不是本人的 → 明确拒绝(V5:绝不允许"看起来成功")。 */
+function denyNotVisible(): FailEnvelope {
   return failEnvelope("DENIED", {
     reason: "not_visible",
     message: "这条待办仅归属人本人可见,你无法查看或操作它。",
     hint: "直接向用户转述:家人之间的待办互相不可见。",
   });
+}
+
+/**
+ * V8:代记者对"我创建、归属他人"的条目只有查看权与删除权,没有修改/完成权。
+ * `action` 只影响话术里的动词(完成/修改/重开),拒绝语义完全一致。
+ */
+function denyNotWritable(view: TodoView, action: "完成" | "修改" | "重开"): FailEnvelope {
+  return failEnvelope("DENIED", {
+    reason: "not_writable",
+    message: `这条待办是你代 ${view.owner_name} 记的,只能由 ${view.owner_name} 本人${action}。`,
+    hint: `向用户说明:代记的条目只有归属人本人能${action};你在记错时可以用 delete_todo 撤回。`,
+  });
+}
+
+/** V7:归属不可变。传入值与现值不同 → DENIED(immutable)+ 固定话术(X14)。 */
+function denyImmutable(view: TodoView, given: string): FailEnvelope {
+  return failEnvelope("DENIED", {
+    reason: "immutable",
+    message:
+      `归属/账本不可修改,如需变更请删除后重建。` +
+      `待办 [${view.id}] 记在 ${view.owner_name} 名下,你不能把它改成「${given}」名下的。`,
+    hint: `要换归属人:先用 delete_todo 删除这条(软删,可恢复),再用 add_todo(owner="${given}") 重建;不要试图用 update 改归属。`,
+  });
+}
+
+/**
+ * 写权限闸门:本人 → 放行(null);自己代记的条目 → V8 not_writable;他人 → not_visible。
+ * V8 只给创建者**可见与删除**权,所以 delete_todo 不用本函数(见 canDeleteTodo)。
+ */
+function denyIfNotOwner(view: TodoView, caller: Caller, action: "完成" | "修改" | "重开"): FailEnvelope | null {
+  if (view.owner_id === caller.memberId) return null;
+  if (view.created_by === caller.memberId) return denyNotWritable(view, action);
+  return denyNotVisible();
+}
+
+/**
+ * 可见性(V1 + V8 的查看权):归属人本人,或该条目的创建者(自己代记的条目)。
+ *
+ * 这是所有其它判定的**前提**——读路径(listTodos)按它过滤,写路径(loadWritableTodo)
+ * 按它先拒绝,所以它必须独立于"删没删过""完没完成"这类状态。
+ */
+export function canSeeTodo(view: TodoView, caller: Caller): boolean {
+  return view.owner_id === caller.memberId || view.created_by === caller.memberId;
+}
+
+/**
+ * 删除权(V3 + V8):归属人本人,或该条目的创建者(自己代记的条目)。
+ * 与可见性同源,所以直接建立在 canSeeTodo 上。
+ *
+ * **恢复权与删除权同源(S1 裁决)**:`restore_deleted` 直接复用本判定
+ * (见 ./restore.ts)。理由:V8 给代记者删除权的目的就是让他纠正自己的笔误,
+ * "能删不能恢复"等于把笔误变成不可挽回——恢复权必须跟着删除权一起给。
+ */
+export function canDeleteTodo(view: TodoView, caller: Caller): boolean {
+  return canSeeTodo(view, caller);
+}
+
+/** 话术里的"这条待办现在什么样":[id]:标题(截止 01-02),与 add/list/complete 同一形状。 */
+function todoHeadline(view: TodoView, timezone: string): string {
+  const dueText = view.due_date ? `(${describeDue(view.due_date, todayInTz(timezone))})` : "";
+  return `[${view.id}]:${view.title}${dueText}`;
+}
+
+export function completeTodo(db: Db, caller: Caller, _timezone: string, id: string): Envelope {
+  const loaded = loadWritableTodo(db, caller, id, "完成");
+  if ("envelope" in loaded) return loaded.envelope;
+  const view = toView(loaded.row);
+  // V8:代记者可看可删,但不能替归属人完成。
+  const denied = denyIfNotOwner(view, caller, "完成");
+  if (denied) return denied;
+
+  if (view.done) {
+    return okEnvelope(view, "该待办已完成,无需重复操作。");
+  }
+  const now = new Date().toISOString();
+  db.prepare("UPDATE todo SET done = 1, done_at = ? WHERE id = ?").run(now, id);
+  const updated = toView(db.prepare(`${SELECT_TODO} WHERE t.id = ?`).get(id) as TodoJoinRow);
+  return okEnvelope(updated, `已完成待办 [${id}]:${view.title}。`);
+}
+
+export interface UpdateTodoInput {
+  id: string;
+  /** 缺省 = 不改;传字符串 = 改成它(§5.1③) */
+  title?: string;
+  /** 缺省 = 不改;null = 清空备注 */
+  notes?: string | null;
+  /** 缺省 = 不改;null = 去掉截止日期 */
+  due_date?: string | null;
+  /**
+   * V7 的不可变字段:schema 保留它是为了让模型做"读-改-写"时能原样回传,
+   * 因此同值幂等放行、不同值 DENIED(immutable)。**不接受 done**
+   * (done 只走 complete_todo / reopen_todo,避免两条路径话术不一致)。
+   */
+  owner?: string;
+}
+
+export function updateTodo(db: Db, caller: Caller, timezone: string, input: UpdateTodoInput): Envelope {
+  const loaded = loadWritableTodo(db, caller, input.id, "修改");
+  if ("envelope" in loaded) return loaded.envelope;
+  const view = toView(loaded.row);
+
+  // 权限先于不可变:不可见的行连"归属是谁"都不该顺带泄露(V5/X4 的教训)。
+  const denied = denyIfNotOwner(view, caller, "修改");
+  if (denied) return denied;
+
+  // V7:同值幂等放行(别名/id 命中同一成员也算同值);不同值一律拒绝。
+  if (input.owner !== undefined) {
+    const resolved = resolveMemberOrEnvelope(db, input.owner);
+    if (!resolved.ok) return resolved.envelope;
+    if (resolved.member.id !== view.owner_id) return denyImmutable(view, input.owner);
+  }
+
+  // §5.1③:缺省 = 不改;null = 清空。值与现值相同的不写库(顺带得到幂等语义)。
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  const changes: string[] = [];
+  if (input.title !== undefined && input.title !== view.title) {
+    sets.push("title = ?");
+    params.push(input.title);
+    changes.push(`标题→「${input.title}」`);
+  }
+  if (input.notes !== undefined && input.notes !== view.notes) {
+    sets.push("notes = ?");
+    params.push(input.notes);
+    // 自由文本不进话术(与 §6 审计不记全文同理),只说改没改。
+    changes.push(input.notes === null ? "备注已清空" : "备注已更新");
+  }
+  if (input.due_date !== undefined && input.due_date !== view.due_date) {
+    sets.push("due_date = ?");
+    params.push(input.due_date);
+    changes.push(input.due_date === null ? "已去掉截止日期" : `截止日期改为 ${input.due_date}`);
+  }
+
+  if (sets.length === 0) {
+    return okEnvelope(view, `待办 ${todoHeadline(view, timezone)} 未做修改(没有字段发生变化)。`);
+  }
+  db.prepare(`UPDATE todo SET ${sets.join(", ")} WHERE id = ?`).run(...params, input.id);
+  const updated = toView(db.prepare(`${SELECT_TODO} WHERE t.id = ?`).get(input.id) as TodoJoinRow);
+  return okEnvelope(updated, `已更新待办 ${todoHeadline(updated, timezone)}。改动:${changes.join(";")}。`);
+}
+
+export function reopenTodo(db: Db, caller: Caller, id: string): Envelope {
+  const loaded = loadWritableTodo(db, caller, id, "重开");
+  if ("envelope" in loaded) return loaded.envelope;
+  const view = toView(loaded.row);
+
+  const denied = denyIfNotOwner(view, caller, "重开");
+  if (denied) return denied;
+
+  // 本就未完成:幂等,不动 done_at(没有"完成时间"可言)。
+  if (!view.done) {
+    return okEnvelope(view, `待办 [${id}]:${view.title} 尚未完成,无需重开。`);
+  }
+  db.prepare("UPDATE todo SET done = 0, done_at = NULL WHERE id = ?").run(id);
+  const updated = toView(db.prepare(`${SELECT_TODO} WHERE t.id = ?`).get(id) as TodoJoinRow);
+  return okEnvelope(updated, `已重开待办 [${id}]:${updated.title}。`);
+}
+
+export function deleteTodo(db: Db, caller: Caller, id: string): Envelope {
+  const loaded = loadWritableTodo(db, caller, id, "删除");
+  if ("envelope" in loaded) return loaded.envelope;
+  const view = toView(loaded.row);
+  const now = new Date().toISOString();
+
+  // V8:代记者可撤回自己代记的条目(删除权与修改权分开给)。
+  if (view.owner_id !== caller.memberId) {
+    // 可见性闸门已在 loadWritableTodo 里跑过;这里是纵深防御,防止日后调序时静默放行。
+    if (!canDeleteTodo(view, caller)) return denyNotVisible();
+    db.prepare("UPDATE todo SET deleted_at = ? WHERE id = ?").run(now, id);
+    return okEnvelope(
+      { ...view, deleted_at: now },
+      `已撤回你代记的条目 [${id}]:${view.title}(归属:${view.owner_name})。` +
+        `${view.owner_name} 的待办列表里不再有它;可用 restore_deleted 恢复。`,
+    );
+  }
+  db.prepare("UPDATE todo SET deleted_at = ? WHERE id = ?").run(now, id);
+  return okEnvelope(
+    { ...view, deleted_at: now },
+    `已删除待办 [${id}]:${view.title}。已删除,可用 restore_deleted(kind="todo", id="${id}") 恢复。`,
+  );
+}
+
+/**
+ * 恢复一条已软删的待办(§4:软删可逆)。与 delete_todo 的差别只有"要看到已删的行"。
+ * 权限复用 canDeleteTodo:**恢复权与删除权同源**,理由见该函数注释。
+ *
+ * **判定顺序:权限先于幂等**(S1c 修复轮)。幂等回执带标题("…未被删除,无需恢复。"),
+ * 若它排在 canDeleteTodo 之前,第三人拿别人的 id 就能读出该条目的标题,
+ * 还顺带读出"它存在、且它没被删"——违反 V1/V3/V5/V6(X4:跨成员传他人条目 id 必须拒绝)。
+ * 调序之后幂等分支只剩"本人/自己代记的条目本来就未删除"这一种情况,话术照旧。
+ */
+export function restoreTodo(db: Db, caller: Caller, id: string): Envelope {
+  const row = loadTodo(db, id);
+  if (!row) return todoMissing(id, "恢复");
+  const view = toView(row);
+  if (!canDeleteTodo(view, caller)) return denyNotVisible();
+  // 未删除 → 幂等:不动任何字段(P2:重复调用不产生副作用)。
+  if (row.deleted_at === null) {
+    return okEnvelope({ ...view, deleted_at: null }, `待办 [${id}]:${view.title} 未被删除,无需恢复。`);
+  }
+
+  db.prepare("UPDATE todo SET deleted_at = NULL WHERE id = ?").run(id);
+  const restored = toView(db.prepare(`${SELECT_TODO} WHERE t.id = ?`).get(id) as TodoJoinRow);
+  const message =
+    view.owner_id === caller.memberId
+      ? `已恢复待办 [${id}]:${view.title}。它重新出现在你的待办列表里(待办仅归属人可见)。`
+      : `已恢复你代记的条目 [${id}]:${view.title}(归属:${view.owner_name})。${view.owner_name} 现在又能看到这条待办了。`;
+  return okEnvelope({ ...restored, deleted_at: null }, message);
 }
