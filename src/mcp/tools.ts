@@ -1,9 +1,11 @@
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type { ZodTypeAny, z } from "zod";
+import { recordAudit } from "../audit/audit.js";
 import type { Db } from "../db/db.js";
 import type { Envelope } from "../domain/envelope.js";
-import { listMembersEnvelope, type Caller } from "../domain/members.js";
+import { listMembersEnvelope } from "../domain/members.js";
 import { addTodo, completeTodo, listTodos } from "../domain/todos.js";
+import type { Viewer } from "../domain/viewer.js";
 import {
   addTodoSchema,
   completeTodoSchema,
@@ -18,6 +20,7 @@ import {
  * 并声明"说话人不是参数"。description 与 schema 变更同等对待,走 golden 测试。
  *
  * 工具层保持薄壳:参数转换 + 话术拼装之外的规则全部在 domain 层。
+ * 说话人以 Viewer 形态从上层传进来(连接身份),工具面没有身份参数、也不感知身份。
  */
 
 export interface ToolDefinition {
@@ -27,21 +30,51 @@ export interface ToolDefinition {
   inputSchema: Record<string, unknown>;
   /** 运行前校验;失败返回 P2 协议信封 */
   parse: (raw: unknown) => { ok: true; args: unknown } | { ok: false; envelope: Envelope };
-  run: (db: Db, caller: Caller, timezone: string, args: unknown) => Envelope;
+  run: (db: Db, viewer: Viewer, timezone: string, args: unknown) => Envelope;
+}
+
+/** 审计摘要里单个字段值的最大长度(整体长度由 recordAudit 再截断)。 */
+const AUDIT_FIELD_MAX = 40;
+
+/**
+ * 写操作的审计摘要:只挑关键字段(§6"只记元数据与关键字段,不记全文")。
+ * 自由文本字段(notes 等)一律不进白名单,避免把私账/备注再复制一份。
+ */
+function summarizeArgs(args: Record<string, unknown>, fields: readonly string[]): string {
+  const parts: string[] = [];
+  for (const field of fields) {
+    const v = args[field];
+    if (v === undefined || v === null) continue;
+    const text = typeof v === "string" ? v : JSON.stringify(v) ?? String(v);
+    parts.push(`${field}=${text.length > AUDIT_FIELD_MAX ? `${text.slice(0, AUDIT_FIELD_MAX)}…` : text}`);
+  }
+  return parts.join(" ");
 }
 
 function defineTool<S extends ZodTypeAny>(def: {
   name: string;
   description: string;
   schema: S;
-  run: (db: Db, caller: Caller, timezone: string, args: z.output<S>) => Envelope;
+  /**
+   * 写操作的审计摘要器(§6)。
+   * **存在即视为写操作**:成功与失败都留一条审计(配错导致的 DENIED 正是最该被追溯的)。
+   * 读操作不提供本字段 → 不记审计。
+   */
+  audit?: (args: z.output<S>) => string;
+  run: (db: Db, viewer: Viewer, timezone: string, args: z.output<S>) => Envelope;
 }): ToolDefinition {
   return {
     name: def.name,
     description: def.description,
     inputSchema: zodToJsonSchema(def.schema, { $refStrategy: "none" }) as Record<string, unknown>,
     parse: (raw) => parseToolArgs(def.schema, def.name, raw),
-    run: (db, caller, tz, args) => def.run(db, caller, tz, args),
+    run: (db, viewer, tz, rawArgs) => {
+      const args = rawArgs as z.output<S>;
+      const envelope = def.run(db, viewer, tz, args);
+      // 审计记录点统一在这里(工具层入口),domain 层不感知审计。
+      if (def.audit) recordAudit(db, viewer, def.name, def.audit(args), envelope);
+      return envelope;
+    },
   };
 }
 
@@ -53,7 +86,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       "它不能用来确认「你是谁」——说话人由连接确定,与成员名单无关。" +
       "示例:list_members()。",
     schema: listMembersSchema,
-    run: (db, caller) => listMembersEnvelope(db, caller),
+    run: (db, viewer) => listMembersEnvelope(db, viewer),
   }),
   defineTool({
     name: "add_todo",
@@ -65,7 +98,9 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       '示例:add_todo(owner="妈妈", title="交物业费", due_date="2026-10-05")。' +
       "注意:说话人由连接确定,本工具没有、也不接受任何身份参数(传 as_member 之类会被拒绝)。",
     schema: addTodoSchema,
-    run: (db, caller, tz, args) => addTodo(db, caller, tz, args),
+    // 审计只留关键字段:notes 是自由文本,按设计 §6 不入审计。
+    audit: (args) => summarizeArgs(args as Record<string, unknown>, ["owner", "title", "due_date"]),
+    run: (db, viewer, tz, args) => addTodo(db, viewer, tz, args),
   }),
   defineTool({
     name: "list_todos",
@@ -76,7 +111,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       '示例:list_todos(due_after="2026-10-05", done=false)。' +
       "注意:说话人由连接确定,没有 owner / as_member 等任何身份参数,传入未知参数会被拒绝(INVALID_PARAMS)。",
     schema: listTodosSchema,
-    run: (db, caller, tz, args) => listTodos(db, caller, tz, args),
+    run: (db, viewer, tz, args) => listTodos(db, viewer, tz, args),
   }),
   defineTool({
     name: "complete_todo",
@@ -87,6 +122,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       "注意:说话人由连接确定,本工具没有任何身份参数。" +
       '示例:complete_todo(id="t-261004-a7k3")。',
     schema: completeTodoSchema,
-    run: (db, caller, tz, args) => completeTodo(db, caller, tz, (args as { id: string }).id),
+    audit: (args) => summarizeArgs(args as Record<string, unknown>, ["id"]),
+    run: (db, viewer, tz, args) => completeTodo(db, viewer, tz, (args as { id: string }).id),
   }),
 ];

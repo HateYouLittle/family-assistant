@@ -38,7 +38,7 @@ mcp_servers:
       X-Family-Member: "m-261004-w9jn"   # 该成员的 id
 ```
 
-`X-Family-Member` 是连接级**身份声明头**:服务端比对它与 token 的归属,不一致立即返回 `DENIED(identity_mismatch)`——这是"把爸爸的 token 装进妈妈的 profile"时唯一的响亮失败通道(§0.1 / S7)。HTTP 头只允许 ASCII,所以值必须填**成员 id**,不要填中文名。
+`X-Family-Member` 是连接级**身份声明头**,**必填**:服务端比对它与 token 的归属,不一致立即返回 `DENIED(identity_mismatch)`——这是"把爸爸的 token 装进妈妈的 profile"时唯一的响亮失败通道(§0.1 / S7)。**漏写同样拒绝**:只校验"写了的那一个"时,把爸爸的 token 装进妈妈的 profile 又不写这个头,就会静默以爸爸的身份运行(0 报错地返回爸爸的待办);所以缺头一律 `DENIED(identity_mismatch)`。HTTP 头只允许 ASCII,所以值必须填**成员 id**,不要填中文名。
 
 ### 配置(环境变量,均有默认值)
 
@@ -49,6 +49,7 @@ mcp_servers:
 | `FA_DB_PATH` | `data/family-assistant.db` | SQLite 文件(WAL 模式) |
 | `FA_TIMEZONE` | `Asia/Shanghai` | 家庭固定单时区;"今天/逾期"全部由此计算 |
 | `FA_IDENTITY_HEADER` | `x-family-member` | 身份声明头的头名 |
+| `FA_REQUIRE_IDENTITY_HEADER` | `true` | 身份声明头是否必填。**保持 true**;置 `0/false` 只为过渡期旧部署,会把 B1(漏写声明头 → 静默串号)重新打开 |
 
 ### 管理(CLI,管理页属后续版本)
 
@@ -62,11 +63,13 @@ npm run admin -- token revoke tok_xxx        # 吊销
 ## 测试
 
 ```bash
-npm test          # 60 个用例:领域集成 + X1/X9/X15/X16 反例 + golden + MCP HTTP e2e
+npm test          # 89 个用例:领域集成 + X1/X9/X15/X16 反例 + golden + 身份声明头(B1) + 审计 + 迁移 + MCP HTTP e2e
 ```
 
 - **golden 契约测试**(`test/golden/tools.json`):工具名、description、inputSchema 逐字冻结(P8)。有意变更时运行 `npx tsx scripts/dump-golden.ts` 重新生成,并按 diff 审查。
-- **e2e** 用 MCP SDK 客户端走真实 Streamable HTTP(无状态、JSON 响应),覆盖 S1/S2 的服务端部分、X9、S7、X15。
+- **审计测试**(`test/audit.test.ts`):写操作留痕、读操作不留痕、摘要不含 `notes` 等自由文本、`member_id` 取连接身份。
+- **迁移测试**(`test/migrations.test.ts`):v2 全量表 + 预置分类(支出 9 / 收入 4),并验证在 v1 既有库上可叠加。
+- **e2e** 用 MCP SDK 客户端走真实 Streamable HTTP(无状态、JSON 响应),覆盖 S1/S2 的服务端部分、X9、S7、B1、X15。
 
 ## Spike 01 剩余步骤(代码之外,须人工完成)
 
@@ -80,14 +83,15 @@ npm test          # 60 个用例:领域集成 + X1/X9/X15/X16 反例 + golden + 
 
 ```
 src/
-  config.ts        环境变量配置(时区显式化,不依赖系统本地时区)
-  db/              openDb(WAL)/ 迁移(member·api_token·todo)/ id 生成(时间序前缀)
-  domain/          领域层:信封与错误码、authenticate(token→成员)、members、todos
-                   —— V1/V3/V4/V8/V9 全部收敛在这一层,可脱离 MCP 直接测试
+  config.ts        环境变量配置(时区显式化,不依赖系统本地时区;身份声明头默认必填)
+  db/              openDb(WAL)/ 迁移(v1 成员·token·todo;v2 category·entry·event·audit_log)/ id 生成(时间序前缀)
+  domain/          领域层:信封与错误码、authenticate(token→成员)、viewer(可见性判定入口)、
+                   members、todos —— V1/V3/V4/V8/V9 全部收敛在这一层,可脱离 MCP 直接测试
+  audit/           写操作审计(append-only,记录点在工具层入口;只记关键字段元数据)
   mcp/             zod 严格 schema、工具定义(P8 中文描述)、低级 MCP Server、
                    Fastify Streamable HTTP(127.0.0.1,每请求独立、无状态)
-  cli/admin.ts     成员与 token 管理入口
-test/              领域 / schema / golden / e2e
+  cli/admin.ts     成员与 token 管理入口(打印含身份声明头的 profile 配置片段)
+test/              领域 / schema / golden / 迁移 / 审计 / e2e
 ```
 
-分层纪律:工具层薄(参数转换 + 话术拼装),业务规则与可见性不变量全在 domain 层;token→成员的解析在领域层入口统一做一次,工具层不感知身份。
+分层纪律:工具层薄(参数转换 + 话术拼装),业务规则与可见性不变量全在 domain 层;token→成员的解析在领域层入口统一做一次(`authenticate`),下游域模块只从 `Viewer`(`src/domain/viewer.ts`)取身份,工具层不感知身份。

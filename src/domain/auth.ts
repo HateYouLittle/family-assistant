@@ -1,20 +1,24 @@
 import { createHash } from "node:crypto";
-import type { AppConfig } from "../config.js";
+import { headerDisplayName, type AppConfig } from "../config.js";
 import type { Db } from "../db/db.js";
 import { failEnvelope, type FailEnvelope } from "./envelope.js";
-import { resolveMemberRef, type Caller } from "./members.js";
+import { resolveMemberRef } from "./members.js";
+import type { Viewer } from "./viewer.js";
 
 /**
  * 身份解析(D13 / §3.2):说话人 = token 所属成员,与请求体里的任何字段无关。
- * 解析在领域层入口统一做一次,工具层不再重复实现。
+ * 解析在领域层入口统一做一次,工具层不再重复实现;下游域模块只从 Viewer 取身份
+ * (见 ./viewer.ts 的约定)。
  *
  * - 未知 / 已吊销 token、token 持有成员已软删 → DENIED(unknown_profile),不回落任何默认成员(V9 / X9)。
- * - 连接级身份声明头(如 X-Family-Member)与 token 所属成员不一致 → DENIED(identity_mismatch)(§0.1 / S7):
- *   这是"把爸爸的 token 装进妈妈的 profile"时唯一的响亮失败通道。
+ * - 连接级身份声明头(如 X-Family-Member)**缺省即拒**(requireIdentityHeader,默认 true):
+ *   声明头必填是 BUG B1 的处置——它原先"有则校验、无则跳过",于是"把爸爸的 token 装进
+ *   妈妈的 profile 且漏写声明头"会 0 报错地以爸爸身份运行(§0.1 / S7)。
+ * - 声明头与 token 所属成员不一致、或声明头值解析不出成员 → DENIED(identity_mismatch)。
  * - token 本体只存哈希:token 是高熵随机串,SHA-256 足够;scrypt/argon2 留给查看页口令。
  */
 export type AuthResult =
-  | { ok: true; caller: Caller }
+  | { ok: true; caller: Viewer }
   | { ok: false; envelope: FailEnvelope };
 
 function denyUnknownProfile(): AuthResult {
@@ -40,9 +44,55 @@ export function extractBearerToken(authHeader: string | undefined): string | nul
   return token === "" ? null : token;
 }
 
+/** 声明头缺失(且配置为必填)时的拒绝:话术必须能直接转述给配置的人看。 */
+function denyMissingIdentityHeader(headerName: string): AuthResult {
+  return {
+    ok: false,
+    envelope: failEnvelope("DENIED", {
+      reason: "identity_mismatch",
+      message: "身份配置不完整:连接未声明身份。",
+      hint:
+        `该 profile 的 mcp_servers.family.headers 需要同时配置 token 与 ${headerName}: <成员 id>` +
+        "(两个头缺一不可;只配 token 会让服务端无法确认这个连接是谁)。",
+    }),
+  };
+}
+
+/**
+ * 声明头值解析不出成员 / 与 token 归属不一致时的统一拒绝。
+ * `declaredName` 为 null 表示值本身解析不出成员——那种情况最常见的原因是填了中文
+ * 成员名(HTTP 头只允许 ASCII,客户端会先报错),话术必须点明这一点。
+ */
+function denyIdentityMismatch(
+  row: { member_name: string },
+  declaredName: string | null,
+  rawValue: string,
+  headerName: string,
+): AuthResult {
+  const idHint = `声明头值应是成员 id(形如 m-261004-6bw9):${headerName} 只能放 ASCII,填中文成员名会在客户端先报错;`;
+  if (declaredName === null) {
+    return {
+      ok: false,
+      envelope: failEnvelope("DENIED", {
+        reason: "identity_mismatch",
+        message: `身份配置不一致:令牌属于 ${row.member_name},但连接声明为无法识别的标识「${rawValue}」。`,
+        hint: `${idHint}该 id 必须在库里真实存在,可先用 list_members / 管理端 member list 核对;修正配置后重试。`,
+      }),
+    };
+  }
+  return {
+    ok: false,
+    envelope: failEnvelope("DENIED", {
+      reason: "identity_mismatch",
+      message: `身份配置不一致:令牌属于 ${row.member_name},但连接声明为 ${declaredName}。`,
+      hint: `${idHint}token 与声明头必须属于同一位成员(当前是 ${row.member_name} 与 ${declaredName});修正配置后重试。`,
+    }),
+  };
+}
+
 export function authenticate(
   db: Db,
-  config: Pick<AppConfig, "identityHeader">,
+  config: Pick<AppConfig, "identityHeader" | "requireIdentityHeader">,
   authHeader: string | undefined,
   identityHeaderValue: string | undefined,
 ): AuthResult {
@@ -63,26 +113,23 @@ export function authenticate(
     return denyUnknownProfile();
   }
 
-  // 连接级身份声明(可选):配置了就必须一致,把配错变成响亮失败而不是静默串号。
-  if (identityHeaderValue !== undefined && identityHeaderValue.trim() !== "") {
-    const declared = resolveMemberRef(db, identityHeaderValue.trim());
+  const headerName = headerDisplayName(config.identityHeader);
+  const declaredRaw = (identityHeaderValue ?? "").trim();
+
+  // 连接级身份声明(默认必填):配错必须响亮失败,而不是静默串号(BUG B1)。
+  if (declaredRaw === "") {
+    if (config.requireIdentityHeader) return denyMissingIdentityHeader(headerName);
+    // 不推荐:过渡期部署才用这个分支——退回"无声明头则跳过校验"的旧语义,
+    // 等于把 B1 重新打开(妈妈的 profile 可能 0 报错地以爸爸身份运行)。
+  } else {
+    const declared = resolveMemberRef(db, declaredRaw);
     const declaredId = declared.ok ? declared.member.id : null;
     if (declaredId !== row.member_id) {
-      const declaredName = declared.ok
-        ? declared.member.name
-        : `无法识别的标识「${identityHeaderValue.trim()}」`;
-      return {
-        ok: false,
-        envelope: failEnvelope("DENIED", {
-          reason: "identity_mismatch",
-          message: `身份配置不一致:令牌属于 ${row.member_name},但连接声明为 ${declaredName}。`,
-          hint: "检查该 Hermes profile 的 token 与身份声明头是否属于同一位成员;修正配置后重试。",
-        }),
-      };
+      return denyIdentityMismatch(row, declared.ok ? declared.member.name : null, declaredRaw, headerName);
     }
   }
 
-  return { ok: true, caller: { memberId: row.member_id, memberName: row.member_name } };
+  return { ok: true, caller: { memberId: row.member_id, memberName: row.member_name, source: "mcp" } };
 }
 
 export interface IssuedToken {

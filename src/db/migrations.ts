@@ -2,7 +2,8 @@ import type { Db } from "./db.js";
 
 /**
  * 迁移按序号递增、只追加。正式 schema 的 member / api_token / todo 部分
- * (设计方案 §4);event / entry 等域在其后的版本追加,不回填改写。
+ * (设计方案 §4)在 v1;event / entry / category / audit_log 在 v2 一次建全,
+ * 不回填改写 v1——既有库上跑 migrate() 即叠加。
  */
 const MIGRATIONS: readonly { id: number; name: string; sql: string }[] = [
   {
@@ -44,6 +45,102 @@ const MIGRATIONS: readonly { id: number; name: string; sql: string }[] = [
       );
       CREATE INDEX idx_todo_owner ON todo(owner_id, deleted_at, done);
       CREATE INDEX idx_todo_creator ON todo(created_by);
+    `,
+  },
+  {
+    id: 2,
+    name: "full schema: category / entry / event_series / event_instance / audit_log",
+    sql: `
+      -- 记账分类(§4)。category 必须先于 entry 建表:entry.category_id 外键指向它。
+      CREATE TABLE category (
+        id         TEXT PRIMARY KEY,
+        name       TEXT NOT NULL,
+        kind       TEXT NOT NULL CHECK(kind IN ('expense','income')),
+        sort_order INTEGER NOT NULL DEFAULT 0
+      );
+      -- 支出与收入可以各有一个「其他」,所以唯一性是 (name, kind) 而不是 name
+      CREATE UNIQUE INDEX idx_category_name_kind ON category(name, kind);
+
+      -- 预置分类(§4):支出 9 类、收入 4 类,id 固定可读 → 迁移幂等且便于排查。
+      INSERT INTO category (id, name, kind, sort_order) VALUES
+        ('cat-expense-food',          '餐饮', 'expense', 10),
+        ('cat-expense-transit',       '交通', 'expense', 20),
+        ('cat-expense-shopping',      '购物', 'expense', 30),
+        ('cat-expense-housing',       '居住', 'expense', 40),
+        ('cat-expense-entertainment', '娱乐', 'expense', 50),
+        ('cat-expense-medical',       '医疗', 'expense', 60),
+        ('cat-expense-education',     '教育', 'expense', 70),
+        ('cat-expense-social',        '人情', 'expense', 80),
+        ('cat-expense-other',         '其他', 'expense', 90),
+        ('cat-income-salary',         '工资', 'income', 10),
+        ('cat-income-investment',     '理财', 'income', 20),
+        ('cat-income-redpacket',      '红包', 'income', 30),
+        ('cat-income-other',          '其他', 'income', 40);
+
+      -- 记账流水(§4):金额为整数分且必须 > 0;归属与账本创建后不可变(V7,由 domain 保证)。
+      CREATE TABLE entry (
+        id            TEXT PRIMARY KEY,
+        type          TEXT NOT NULL CHECK(type IN ('expense','income')),
+        amount_fen    INTEGER NOT NULL CHECK(amount_fen > 0),
+        category_id   TEXT REFERENCES category(id),
+        ledger        TEXT NOT NULL CHECK(ledger IN ('shared','personal')),
+        member_id     TEXT NOT NULL REFERENCES member(id),
+        note          TEXT,
+        occurred_date TEXT NOT NULL,
+        created_by    TEXT NOT NULL REFERENCES member(id),
+        created_at    TEXT NOT NULL,
+        deleted_at    TEXT
+      );
+      CREATE INDEX idx_entry_occurred ON entry(occurred_date, deleted_at);
+      CREATE INDEX idx_entry_member_ledger ON entry(member_id, ledger, deleted_at);
+
+      -- 日程 = 系列 + 实例(§4)。owner_id 为空 = 全家共享(V2);指定 = 个人日程(V1)。
+      CREATE TABLE event_series (
+        id              TEXT PRIMARY KEY,
+        owner_id        TEXT REFERENCES member(id),
+        title           TEXT NOT NULL,
+        location        TEXT,
+        notes           TEXT,
+        repeat          TEXT NOT NULL DEFAULT 'none' CHECK(repeat IN ('none','daily','weekly','monthly')),
+        repeat_interval INTEGER NOT NULL DEFAULT 1,
+        repeat_until    TEXT,
+        created_by      TEXT NOT NULL REFERENCES member(id),
+        created_at      TEXT NOT NULL,
+        deleted_at      TEXT
+      );
+      CREATE INDEX idx_event_series_owner ON event_series(owner_id, deleted_at);
+
+      -- repeat ≠ none 的系列在写时物化成实例(未来 92 天),读取越界时惰性续期。
+      CREATE TABLE event_instance (
+        id         TEXT PRIMARY KEY,
+        series_id  TEXT REFERENCES event_series(id),
+        owner_id   TEXT REFERENCES member(id),
+        title      TEXT NOT NULL,
+        location   TEXT,
+        notes      TEXT,
+        start      TEXT NOT NULL,
+        end        TEXT,
+        all_day    INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT NOT NULL REFERENCES member(id),
+        created_at TEXT NOT NULL,
+        deleted_at TEXT
+      );
+      CREATE INDEX idx_event_instance_start ON event_instance(start);
+      CREATE INDEX idx_event_instance_owner_start ON event_instance(owner_id, start, deleted_at);
+
+      -- 审计日志(§6):append-only,只记写操作。
+      -- 刻意**不建**外键与更新/删除入口:审计记录必须活得比成员/数据更久
+      -- (成员被软删、条目被删,审计仍要能追溯当时是谁写的)。
+      CREATE TABLE audit_log (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        at           TEXT NOT NULL,
+        member_id    TEXT NOT NULL,
+        member_name  TEXT NOT NULL,
+        tool         TEXT NOT NULL,
+        args_summary TEXT NOT NULL,
+        result_code  TEXT NOT NULL,
+        ok           INTEGER NOT NULL
+      );
     `,
   },
 ];

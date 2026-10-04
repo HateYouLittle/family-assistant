@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
-import { loadConfig } from "../config.js";
+import { headerDisplayName, loadConfig } from "../config.js";
 import { openDb } from "../db/db.js";
 import { migrate } from "../db/migrations.js";
 import { issueToken, listTokens, revokeToken } from "../domain/auth.js";
@@ -101,8 +101,9 @@ function main(): void {
         console.log(`    url: "http://127.0.0.1:${config.mcpPort}/mcp"`);
         console.log(`    headers:`);
         console.log(`      Authorization: "Bearer ${issued.token}"`);
-        console.log(`      # 身份声明头:值必须是本成员的 id(HTTP 头只允许 ASCII);与 token 归属不一致会报 identity_mismatch(S7)`);
-        console.log(`      ${toHeaderName(config.identityHeader)}: "${member.id}"`);
+        console.log(`      # 身份声明头(必填):值必须是本成员的 id(HTTP 头只允许 ASCII,不能填中文名)。`);
+        console.log(`      # 缺失或与 token 归属不一致,一律 DENIED(identity_mismatch)——S7 的响亮失败通道。`);
+        console.log(`      ${headerDisplayName(config.identityHeader)}: "${member.id}"`);
         return;
       }
       if (sub === "list") {
@@ -140,13 +141,6 @@ function main(): void {
   } finally {
     db.close();
   }
-}
-
-function toHeaderName(lower: string): string {
-  return lower
-    .split("-")
-    .map((p) => (p === "" ? "" : p[0]!.toUpperCase() + p.slice(1)))
-    .join("-");
 }
 
 main();

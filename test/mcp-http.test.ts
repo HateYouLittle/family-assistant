@@ -13,14 +13,18 @@ import type { AppConfig } from "../src/config.js";
 /**
  * Spike 01 端到端:真实 Streamable HTTP(无状态 + JSON 响应)上的
  * 身份闭环 —— S1/S2 的服务端部分、X9、S7(identity_mismatch)、X15。
+ * 身份声明头默认**必填**(B1),所以每个 client 都带 X-Family-Member(= 成员 id)。
  */
+
+const IDENTITY_HEADER = "x-family-member";
 
 const config: AppConfig = {
   mcpHost: "127.0.0.1",
   mcpPort: 0, // listen 时用 0 = 随机端口
   dbPath: ":memory:",
   timezone: "Asia/Shanghai",
-  identityHeader: "x-family-member",
+  identityHeader: IDENTITY_HEADER,
+  requireIdentityHeader: true,
 };
 
 let db: ReturnType<typeof openDb>;
@@ -54,6 +58,11 @@ afterEach(async () => {
   db.close();
 });
 
+/** 身份声明头必填:连上 /mcp 的头 = token + 声明头(= 成员 id)。 */
+function authHeaders(member: MemberRow, token: string): Record<string, string> {
+  return { Authorization: `Bearer ${token}`, [IDENTITY_HEADER]: member.id };
+}
+
 async function connect(headers: Record<string, string>): Promise<Client> {
   const client = new Client({ name: "e2e", version: "0.0.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(base), { requestInit: { headers } }));
@@ -68,7 +77,7 @@ function envelopeOf(result: unknown): { envelope: Record<string, unknown>; isErr
 
 describe("MCP HTTP 端到端", () => {
   it("有效 token:tools/list 暴露 4 个工具;list_members 走通", async () => {
-    const client = await connect({ Authorization: `Bearer ${tokenMama}` });
+    const client = await connect(authHeaders(mama, tokenMama));
     try {
       const tools = await client.listTools();
       assert.deepEqual(
@@ -86,8 +95,8 @@ describe("MCP HTTP 端到端", () => {
   });
 
   it("S1/S2 服务端部分:两个 token 各记各的,互不串", async () => {
-    const mamaClient = await connect({ Authorization: `Bearer ${tokenMama}` });
-    const babaClient = await connect({ Authorization: `Bearer ${tokenBaba}` });
+    const mamaClient = await connect(authHeaders(mama, tokenMama));
+    const babaClient = await connect(authHeaders(baba, tokenBaba));
     try {
       await mamaClient.callTool({ name: "add_todo", arguments: { title: "妈妈的待办" } });
       await babaClient.callTool({ name: "add_todo", arguments: { title: "爸爸的待办" } });
@@ -105,7 +114,7 @@ describe("MCP HTTP 端到端", () => {
   });
 
   it("S6 服务端部分:代记回执由服务端写出说话人", async () => {
-    const babaClient = await connect({ Authorization: `Bearer ${tokenBaba}` });
+    const babaClient = await connect(authHeaders(baba, tokenBaba));
     try {
       const add = envelopeOf(
         await babaClient.callTool({
@@ -121,7 +130,10 @@ describe("MCP HTTP 端到端", () => {
   });
 
   it("X9:未知 token 调用 → DENIED(unknown_profile)", async () => {
-    const client = await connect({ Authorization: "Bearer fam_not_a_token" });
+    const client = await connect({
+      Authorization: "Bearer fam_not_a_token",
+      [IDENTITY_HEADER]: mama.id,
+    });
     try {
       const res = await client.callTool({ name: "list_members", arguments: {} });
       const { envelope, isError } = envelopeOf(res);
@@ -137,7 +149,7 @@ describe("MCP HTTP 端到端", () => {
     // HTTP 头只允许 ASCII,声明头用成员 id
     const client = await connect({
       Authorization: `Bearer ${tokenBaba}`,
-      "x-family-member": mama.id,
+      [IDENTITY_HEADER]: mama.id,
     });
     try {
       const res = await client.callTool({ name: "list_todos", arguments: {} });
@@ -150,8 +162,37 @@ describe("MCP HTTP 端到端", () => {
     }
   });
 
-  it("X15 e2e:被诱导传 as_member → INVALID_PARAMS(未知字段)", async () => {
+  it("B1:token 有效但缺身份声明头 → DENIED(identity_mismatch),不再静默串号", async () => {
+    const client = await connect({ Authorization: `Bearer ${tokenMama}` });
+    try {
+      const res = await client.callTool({ name: "list_todos", arguments: {} });
+      const { envelope, isError } = envelopeOf(res);
+      assert.equal(isError, true);
+      assert.equal(envelope.code, "DENIED");
+      assert.equal(envelope.reason, "identity_mismatch");
+      assert.match(envelope.message as string, /身份配置不完整:连接未声明身份/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("B1:缺声明头时 tools/list 仍可列工具,但任何调用都被拒(工具面不含身份信息)", async () => {
     const client = await connect({ Authorization: `Bearer ${tokenBaba}` });
+    try {
+      assert.equal((await client.listTools()).tools.length, 4);
+      const res = await client.callTool({ name: "add_todo", arguments: { title: "不该被记下" } });
+      const { envelope, isError } = envelopeOf(res);
+      assert.equal(isError, true);
+      assert.equal(envelope.reason, "identity_mismatch");
+      const count = db.prepare("SELECT COUNT(*) AS n FROM todo").get() as { n: number };
+      assert.equal(count.n, 0, "被拒的调用不得留下任何写入");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("X15 e2e:被诱导传 as_member → INVALID_PARAMS(未知字段)", async () => {
+    const client = await connect(authHeaders(baba, tokenBaba));
     try {
       const res = await client.callTool({ name: "list_todos", arguments: { as_member: "妈妈" } });
       const { envelope, isError } = envelopeOf(res);
@@ -165,7 +206,7 @@ describe("MCP HTTP 端到端", () => {
   });
 
   it("缺少必填参数 → MISSING_PARAMS;参数错误不抛协议异常", async () => {
-    const client = await connect({ Authorization: `Bearer ${tokenMama}` });
+    const client = await connect(authHeaders(mama, tokenMama));
     try {
       const res = await client.callTool({ name: "add_todo", arguments: {} });
       const { envelope, isError } = envelopeOf(res);

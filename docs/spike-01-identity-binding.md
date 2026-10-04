@@ -23,7 +23,7 @@ v0.6 把身份从"模型逐条申报"改成"**连接的属性**"（D13：每成�
 
 1. **多 bot 凭据可行**：每位成员各自一个 bot 身份，家人能各自和"自己的"bot 私聊（R10）。
 2. **绑定正确**：每个 profile 配的是**本人**的 token，服务端由 token 得到正确成员。
-3. **配错会响亮失败**：故意错配 → `identity_mismatch`，**不得静默以他人身份运行**。
+3. **配错会响亮失败**：故意错配 → `identity_mismatch`，**不得静默以他人身份运行**。落地方案：每个 profile 的 `mcp_servers.family.headers` 同时配 token 与身份声明头 `X-Family-Member: <成员 id>`，且**声明头必填**（缺头即 `DENIED(identity_mismatch)`，`FA_REQUIRE_IDENTITY_HEADER` 默认 `true`）——没有第二个信息源时，服务端无法发现"token 装错了人"（2026-10-04 实测确认过这个静默串号）。
 4. **冒充不可表达**：工具面没有任何身份参数（X15）。
 5. **cron 身份自动正确**：定时任务（无人在场）落到正确成员名下（D11 已退役）。
 6. **群聊不被误当成某人**：bot 不进群；若被误拉进群，行为可预期（不猜身份）。
@@ -64,7 +64,7 @@ SQLite 复用正式 schema 的 member + todo + api_token 部分。
 | S4 | 爸爸「我妈有什么待办」 | 无此参数形态；明确说明互相不可见。**反复尝试读取 = 失败** |
 | S5 | 爸爸「把妈妈的『交电费』删了」 | **必须被拒**（`DENIED`）。成功 = **严重失败** |
 | S6 | 妈妈「帮我记一下，我爸明天要交物业费」 | `owner=爸爸`，回执"仅 爸爸 可见，**由 妈妈 代记**"（说话人由服务端写，不是模型说的） |
-| S7 | **故意把妈妈的 profile 配成爸爸的 token** | 必须 `DENIED(identity_mismatch)`。**静默以爸爸身份运行 = 严重失败** |
+| S7 | **故意把妈妈的 profile 配成爸爸的 token** | 必须 `DENIED(identity_mismatch)`。**静默以爸爸身份运行 = 严重失败**。已实测两种配法:① 带声明头 → `DENIED(identity_mismatch)`;② **漏写声明头**(旧语义)→ **静默返回爸爸的待办**,故声明头改为必填(BUG B1) |
 | S8 | 用未注册 / 已吊销的 token 调用 | `DENIED(unknown_profile)`，**不回落任何默认成员**（X9） |
 | S9 | 妈妈的 cron 定时任务（无人在场） | 落到妈妈名下；prompt 里**不写任何身份**（D11 已退役） |
 | S10 | 一段长对话（≥20 轮）后再调用 | 身份不变（连接级，不随上下文漂移） |
@@ -83,7 +83,7 @@ SQLite 复用正式 schema 的 member + todo + api_token 部分。
 ## 上线检查项（正式开发前逐条确认）
 
 - [ ] 每位成员的 bot 凭据与 Hermes profile **一一对应**，由一位**非开发者家人**确认过一次
-- [ ] 每个 profile 的 family token 属于**正确的人**（S7 已实测）
+- [ ] 每个 profile 的 family token 属于**正确的人**，且 `X-Family-Member` 声明头**同时配好**（S7 已实测：缺声明头 → `DENIED(identity_mismatch)`）
 - [ ] **Hermes 侧 DM allowlist / pairing 已显式配置**（不得依赖默认值：微信 `dm_policy` 的平台默认是 `open`），逐个确认家人能进、外人进不来
 - [ ] 每个 profile 的群策略为 `disabled`，**bot 没有被拉进任何群**
 - [ ] 家人通道的工具面已**收窄到 family 工具集 + 必要只读工具**

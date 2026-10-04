@@ -1,7 +1,8 @@
 import type { Db } from "../db/db.js";
 import { daysBetween, generateId, todayInTz } from "../db/id.js";
 import { failEnvelope, okEnvelope, type Envelope } from "./envelope.js";
-import { resolveMemberOrEnvelope, type Caller } from "./members.js";
+import { resolveMemberOrEnvelope } from "./members.js";
+import type { Caller } from "./viewer.js";
 
 /**
  * 待办域(设计方案 §4/§5)。可见性收敛在本层,工具层不可绕过:
@@ -9,7 +10,7 @@ import { resolveMemberOrEnvelope, type Caller } from "./members.js";
  * - V3/V6 仅本人可改删完成;
  * - V4 可代记(owner ≠ 说话人),回执由服务端标注"仅 TA 可见,由 <说话人> 代记";
  * - V8 代记者保留查看权与删除权、无修改/完成权;
- * - 说话人来自连接(caller),工具面没有身份参数(P7/D13)。
+ * - 说话人来自连接(Caller,见 ./viewer.ts),工具面没有身份参数(P7/D13)。
  */
 
 export interface TodoView {

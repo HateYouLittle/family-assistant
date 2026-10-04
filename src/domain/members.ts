@@ -8,11 +8,12 @@ import {
   type MemberCandidate,
 } from "./envelope.js";
 
-/** 说话人上下文:由 token 解析得出(连接身份),工具层不感知其内容。 */
-export interface Caller {
-  memberId: string;
-  memberName: string;
-}
+/**
+ * 说话人上下文统一在 ./viewer.ts 定义(可见性 V1–V9 的唯一判定入口)。
+ * 这里只做转出以兼容既有导入方,不再保留第二份定义。
+ */
+import type { Caller, Viewer } from "./viewer.js";
+export type { Caller, Viewer };
 
 export interface MemberRow {
   id: string;
@@ -168,7 +169,7 @@ export function setAliases(db: Db, memberId: string, aliases: string[]): void {
   db.prepare("UPDATE member SET aliases = ? WHERE id = ?").run(JSON.stringify(aliases), memberId);
 }
 
-export function listMembersEnvelope(_db: Db, _caller: Caller): Envelope {
+export function listMembersEnvelope(_db: Db, _viewer: Viewer): Envelope {
   const members = listActiveMembers(_db);
   const text = members
     .map((m) => (m.aliases.length > 0 ? `${m.name}(别名:${m.aliases.join("、")})` : m.name))
