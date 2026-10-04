@@ -123,6 +123,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     description:
       "列出家庭成员的名称与别名,用于把「我妈」这类称呼解析成 owner 等归属参数;成员匹配失败后也可重查名单再试。" +
       "它不能用来确认「你是谁」——说话人由连接确定,与成员名单无关。" +
+      "**无参数**:本工具不接收任何参数,传任何字段(包括 as_member / owner 这类身份参数)一律返回 INVALID_PARAMS(未知字段)。" +
       "示例:list_members()。",
     schema: listMembersSchema,
     run: (db, viewer) => listMembersEnvelope(db, viewer),
@@ -339,7 +340,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     name: "list_categories",
     description:
       "列出记账分类(缺省 = 支出与收入全列,回执按支出/收入分组)。返回的 id 就是 add_entry / list_entries / summarize_entries 里要传的 category_id。" +
-      'kind 可传 "expense" 或 "income" 只看一类。**分类不是必填的**:add_entry 不给 category_id 就是「未分类」,汇总里会单列,所以不必为了记账先建分类。' +
+      'kind 可传 "expense" 或 "income" 只看一类,传其它值(或大小写写错)返回 INVALID_PARAMS 并指明字段。**分类不是必填的**:add_entry 不给 category_id 就是「未分类」,汇总里会单列,所以不必为了记账先建分类。' +
       "查某笔花在哪用 list_entries(category_id=…);要按分类看这个月花销用 summarize_entries(group_by=\"category\")。" +
       '示例:list_categories(kind="expense");或 list_categories() 看全部。' +
       "注意:说话人由连接确定,本工具没有、也不接受任何身份参数。",
