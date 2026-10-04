@@ -1,0 +1,99 @@
+[
+  {
+    "name": "list_members",
+    "description": "列出家庭成员的名称与别名,用于把「我妈」这类称呼解析成 owner 等归属参数;成员匹配失败后也可重查名单再试。它不能用来确认「你是谁」——说话人由连接确定,与成员名单无关。示例:list_members()。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "add_todo",
+    "description": "添加一条待办。待办一律是个人项,仅归属人本人可见。owner 缺省为说话人本人;指定他人即代记,条目仅对方可见,回执会注明「由你代记」。先调 list_members 确认称呼:成员匹配不到会返回 MISSING_PARAMS(附成员名单),重名会返回 AMBIGUOUS(附候选),此时列出候选让用户确认,不要瞎猜。due_date 为 YYYY-MM-DD;相对日期(明天、下周三)先自行换算再传。示例:add_todo(owner=\"妈妈\", title=\"交物业费\", due_date=\"2026-10-05\")。注意:说话人由连接确定,本工具没有、也不接受任何身份参数(传 as_member 之类会被拒绝)。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "归属人:成员名、别名或成员 id;缺省 = 说话人本人。指定他人 = 代记,条目仅对方可见。"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "待办标题,一句话。"
+        },
+        "due_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "截止日期,YYYY-MM-DD,可缺省。相对日期(明天/下周三)先自行换算再传。"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 2000,
+          "description": "补充备注,可缺省。"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "list_todos",
+    "description": "列出待办。只返回说话人本人的待办,以及本人代他人记的待办(可看,但不能替对方完成);没有查询他人待办的参数,家人的待办互相不可见——若用户打听他人待办,直接说明这一点,不要换参数重试。done=true 只看已完成、false 只看未完成;due_before / due_after 为 YYYY-MM-DD,均含边界;q 按标题或备注模糊过滤。示例:list_todos(due_after=\"2026-10-05\", done=false)。注意:说话人由连接确定,没有 owner / as_member 等任何身份参数,传入未知参数会被拒绝(INVALID_PARAMS)。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "done": {
+          "type": "boolean",
+          "description": "true=只看已完成,false=只看未完成;缺省=全部。"
+        },
+        "due_before": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "截止日期上界(含边界),YYYY-MM-DD。"
+        },
+        "due_after": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "截止日期下界(含边界),YYYY-MM-DD。"
+        },
+        "q": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "按标题/备注模糊过滤的关键词。"
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "complete_todo",
+    "description": "完成一条待办。必须先 list_todos 拿到精确 id,程序不接受模糊指定。仅限本人待办:完成他人(含自己代记)的待办会返回 DENIED,请把原因原样转述给用户,不要重试。对已完成的待办重复调用无副作用。注意:说话人由连接确定,本工具没有任何身份参数。示例:complete_todo(id=\"t-261004-a7k3\")。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "待办 id,从 list_todos 的结果里原样复制,不要凭记忆转述。"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  }
+]
