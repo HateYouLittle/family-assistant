@@ -32,6 +32,7 @@ npm install
 npm run admin -- member add 妈妈 --alias 老妈 --alias 王丽
 npm run admin -- member add 爸爸
 npm run admin -- token generate 妈妈 --label "hermes profile"
+npm run admin -- admin set-password      # 管理口令;不设的话 /admin 一律 503
 npm run dev            # 开发模式;生产:npm run build && npm start
 ```
 
@@ -87,7 +88,36 @@ npm run admin -- member clear-password 妈妈        # 清除口令:该成员无
 
 > **R9 的已知代价:局域网内没有 HTTPS,口令以明文经过 Wi-Fi。** 这是家庭自托管明确接受的代价(设计 §10):换来的边界是"防误用与防越权诱导,不防已经拿到凭据的人"。因此页面只绑局域网网卡(`FA_WEB_HOST`)、强制非默认口令、登录限速,并且**不要把口令写进日志**。cookie 上没有 `Secure` 属性正是这个原因(加了浏览器直接不发 cookie)。
 
-### 管理(CLI;管理页属 S6b)
+### 管理页(`ADMIN_PASSWORD` 保护,日常不碰)
+
+管理页挂在**查看页的同一个门面、同一个 `FA_WEB_HOST`** 上(没有第二个监听口),路径前缀 `/admin`:
+
+```bash
+npm run admin -- admin set-password          # 先设管理口令;不给 --password 则随机生成,只显示一次
+npm run admin -- admin status                # 只报"已设置/未设置",不报任何内容
+FA_WEB_HOST=192.168.1.23 npm start           # 与查看页同一个绑定地址
+# 浏览器打开 http://192.168.1.23:8348/admin/login
+```
+
+**未设管理口令时,`/admin` 下的一切一律 503**,并明确提示上面那条 CLI 命令 —— **没有默认口令**,也不会回落到空口令。管理页**自己不是设置入口**:那等于"打开管理页给自己开门",绕过口令这道闸。
+
+| 路径 | 内容 |
+|---|---|
+| `GET /admin` | 总览:六个区块入口 + 计数(不列任何家庭内容) |
+| `GET /admin/members` | 成员列表(name / aliases / 是否已设查看页口令 / 名下 token 数与是否有效)+ 新增 / 维护别名 / **软删** / 重置查看页口令。冲突(重名、别名撞车)**响亮报错**并指出冲突的是哪一个 |
+| `GET /admin/tokens` | 按成员分组的 family token;生成 / 吊销。明文**只在生成的那一次响应里出现**,同时给出可直接粘贴的 Hermes profile 片段(两个头 + `url`) |
+| `GET /admin/categories` | 分类按 kind 分组;新增走与 `add_category` **同一个域函数**(同名同类冲突响亮报错并告知已有 id) |
+| `GET /admin/audit?limit=N` | 最近 N 条(上限 200):时间 / 说话人 / 工具 / 关键参数元数据 / 结果码。**不含**备注类自由文本、**不含**任何 token 明文或口令 |
+| `GET /admin/backup` · `GET /admin/backup/download` | 一键下载 SQLite 在线备份:`VACUUM INTO` → **系统临时目录** → 读出字节下发 → **下发后立即清理**(不落共享目录,R9) |
+| `GET /admin/health` | MCP 端点是否在服务(**本进程内自检**,不去外网)、DB 是否可读与文件大小(含 `-wal`,WAL 模式下主库大小会骗人)、最近一次备份时间、cron 最近投递(只读展示,**程序自身不推送**,没有数据时如实显示"暂无") |
+
+**管理页没有自己的业务规则**:建成员 / 改别名 / 软删 / 建分类 / 发吊 token / 设查看页口令,调的都是既有的 domain 函数(与 CLI、与 MCP 工具同一批实现)。所有写操作记审计,身份是固定保留字 `__admin__` / 「管理员」——管理端**没有家庭成员身份**,也绝不借用某位家人的身份来背锅(那会把 R1 唯一的追溯机制变成谎话)。
+
+**加固**:管理口令用**同一套 scrypt** 哈希(复用查看页那套实现,不另写第二份)存 `setting` 表;管理会话与查看页会话**分开的 cookie 名(`fa_admin_session`)、载荷格式、签名密钥与有效期**(管理端 1 小时 vs 查看页 12 小时),**成员会话不能当管理员用、反之亦然**;登录失败按来源 IP 限速,**连续 3 次失败锁定 30 分钟**;改管理口令会让已签发的管理会话一并失效(会话签名里含口令指纹);所有输出过 `h()` 转义;写操作一律 POST,一次性明文页一律 `cache-control: no-store`。
+
+> **R9 的已知代价对管理页同样成立**:一次管理登录就能下载整库备份、吊销任何人的 token、软删成员;局域网内没有 HTTPS,口令明文经过 Wi-Fi。管理页同样只绑 `FA_WEB_HOST`(缺省回环)、强制非默认口令、登录限速、备份文件不落在共享目录。
+
+### 管理(CLI)
 
 ```bash
 npm run admin -- member list                                  # 成员列表(含查看页口令状态)
@@ -96,18 +126,24 @@ npm run admin -- member set-password 妈妈 [--password <明文>]   # 设置查�
 npm run admin -- member clear-password 妈妈                    # 清除查看页口令
 npm run admin -- token list                                   # token 元数据(只显示哈希后状态)
 npm run admin -- token revoke tok_xxx                         # 吊销
+npm run admin -- admin set-password [--password <明文>]        # 设置管理口令(管理页的入口)
+npm run admin -- admin clear-password                         # 清除管理口令(此后管理页一律 503)
+npm run admin -- admin status                                 # 只报已设置/未设置
 ```
+
+CLI 与管理页调的是同一批 domain 函数、同一套 profile 片段实现(`src/admin/profile.ts`);CLI 保留为"看得见、改得动、可脚本化"的那条路。
 
 ## 测试
 
 ```bash
-npm test          # 322 个用例:领域集成 + X1/X9/X15/X16 反例 + golden + 身份声明头(B1) + 审计 + 迁移 + 时区口径 + MCP HTTP e2e
+npm test          # 522 个用例:领域集成 + X1/X9/X15/X16 反例 + golden + 身份声明头(B1) + 审计 + 迁移 + 时区口径 + MCP HTTP e2e + 管理页
 ```
 
 - **golden 契约测试**(`test/golden/tools.json`):工具名、description、inputSchema 逐字冻结(P8)。有意变更时运行 `npx tsx scripts/dump-golden.ts` 重新生成,并按 diff 审查。
 - **审计测试**(`test/audit.test.ts`):写操作留痕、读操作不留痕、摘要不含 `notes` 等自由文本、`member_id` 取连接身份。
 - **迁移测试**(`test/migrations.test.ts`):v2 全量表 + 预置分类(支出 9 / 收入 4),并验证在 v1 既有库上可叠加。
 - **e2e** 用 MCP SDK 客户端走真实 Streamable HTTP(无状态、JSON 响应),覆盖 S1/S2 的服务端部分、X9、S7、B1、X15。
+- **管理页测试**(`test/admin.test.ts`):未设口令一律 503、错口令与限速、**两面会话互不通用**、软删后其 token 跨门面真跑 `/mcp` 得到 `DENIED(unknown_profile)`、token 明文"只显示一次 + 库里只有 sha256(裸 SQL 断言)"、分类冲突、审计固定身份 `__admin__` 且无凭据、`VACUUM INTO` 备份可打开且临时文件已清理、健康 JSON 四项齐全且无成员数据。全程 `app.inject()`,不起真实端口。
 
 ## Spike 01 剩余步骤(代码之外,须人工完成)
 
@@ -122,15 +158,19 @@ npm test          # 322 个用例:领域集成 + X1/X9/X15/X16 反例 + golden +
 ```
 src/
   config.ts        环境变量配置(时区显式化,不依赖系统本地时区;身份声明头默认必填)
-  db/              openDb(WAL)/ 迁移(v1 成员·token·todo;v2 category·entry·event·audit_log)/ id 生成(时间序前缀)
+  db/              openDb(WAL)/ 迁移(v1 成员·token·todo;v2 category·entry·event·audit_log;v4 setting)/ id 生成(时间序前缀)
   domain/          领域层:信封与错误码、authenticate(token→成员)、viewer(可见性判定入口)、
                    members、todos、events、ledger(分类与流水)、today(今日概览)、restore ——
                    V1–V9 全部收敛在这一层,可脱离 MCP 直接测试
   audit/           写操作审计(append-only,记录点在工具层入口;只记关键字段元数据)
   mcp/             zod 严格 schema、工具定义(P8 中文描述)、低级 MCP Server、
                    Fastify Streamable HTTP(127.0.0.1,每请求独立、无状态)
-  cli/admin.ts     成员与 token 管理入口(打印含身份声明头的 profile 配置片段)
-test/              领域 / schema / golden / 迁移 / 审计 / e2e
+  admin/           管理页(S6b):http(路由与三道闸)、pages(渲染)、audit(固定身份 __admin__ 的留痕)、
+                   backup(VACUUM INTO)、health(四项只读)、profile(CLI 与管理页共用的 Hermes 配置片段)
+  web/             查看页:auth(成员登录/会话/限速,scrypt)、admin-auth(管理口令/管理会话,复用同一套 scrypt)、
+                   html(转义与骨架)、http(门面)、pages(三个只读页)
+  cli/admin.ts     成员、token 与管理口令的管理入口
+test/              领域 / schema / golden / 迁移 / 审计 / e2e / web / admin
 ```
 
 分层纪律:工具层薄(参数转换 + 话术拼装),业务规则与可见性不变量全在 domain 层;token→成员的解析在领域层入口统一做一次(`authenticate`),下游域模块只从 `Viewer`(`src/domain/viewer.ts`)取身份,工具层不感知身份。

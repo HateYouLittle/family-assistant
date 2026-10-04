@@ -838,11 +838,15 @@ describe("查看页只读:页面不写库(审计与业务表都不变)", () => {
     }
   });
 
-  it("没有意外的写路由:除 POST /login 与 POST /logout 外,不存在可用的写端点", async () => {
+  it("查看页自己没有意外的写路由:除 POST /login 与 POST /logout 外,不存在可用的写端点", async () => {
     setPasswords();
     const { cookie } = await login("mama");
+    // **不含 `/admin`**:S6b 起管理页在同一 app 上注册了 `/admin/*` 的写路由,
+    // "查看页只读"这条纪律约束的是**查看页自己的那几条路由**。
+    // 管理页的写路由由另一套闸门把守(管理口令 + 独立会话,见 test/admin.test.ts:
+    // 拿成员会话 cookie 调 /admin/* 一律被拒),那才是它们该被断言的地方。
     for (const method of ["POST", "PUT", "PATCH", "DELETE"] as const) {
-      for (const path of ["/todos", "/calendar", "/ledger", "/entries", "/events", "/admin", "/healthz"]) {
+      for (const path of ["/todos", "/calendar", "/ledger", "/entries", "/events", "/healthz"]) {
         const res = await app.inject({
           method,
           url: path,
@@ -851,7 +855,7 @@ describe("查看页只读:页面不写库(审计与业务表都不变)", () => {
         });
         assert.ok(
           res.statusCode === 404 || res.statusCode === 405,
-          `${method} ${path} 返回 ${res.statusCode}:查看页不该有任何写端点(管理页属 S6b)`,
+          `${method} ${path} 返回 ${res.statusCode}:查看页不该有任何写端点`,
         );
       }
     }

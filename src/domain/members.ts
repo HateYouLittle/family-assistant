@@ -120,12 +120,36 @@ export interface CreateMemberInput {
   aliases?: string[];
 }
 
+/** 别名归一化:去空白、去重(同一次输入里写两遍同一个别名不算冲突)。 */
+export function normalizeAliases(input: readonly string[]): string[] {
+  return [...new Set(input.map((a) => a.trim()).filter((a) => a !== ""))];
+}
+
+/**
+ * **别名冲突的唯一判定**(建成员与改别名共用,S6b 管理页复用它)。
+ *
+ * 冲突 = 别名撞上**别人**的成员名或别名(`exceptId` 是本成员自己:改自己的别名时,
+ * 自己名字相同不算冲突)。
+ * 返回第一个冲突的别名,没有则 null。
+ *
+ * 为什么冲突必须响亮报错而不是先存着:别名是归属解析的一级(`resolveMemberRef`),
+ * 两条记录共用一个别名会让日常说话直接变成 `AMBIGUOUS`,而**等发现时数据已经写错了**。
+ * 所以"写进去之前"就要拦。
+ */
+function findAliasConflict(existing: MemberRow[], aliases: string[], exceptId: string | null): string | null {
+  for (const alias of aliases) {
+    const hit = existing.find((m) => m.id !== exceptId && (m.name === alias || m.aliases.includes(alias)));
+    if (hit !== undefined) return alias;
+  }
+  return null;
+}
+
 /** 管理入口(不走 MCP):建成员。别名与现有成员的名称/别名冲突会响亮报错,避免日后归属解析歧义。 */
 export function createMember(db: Db, timezone: string, input: CreateMemberInput):
   | { ok: true; member: MemberRow }
   | { ok: false; envelope: FailEnvelope } {
   const name = input.name.trim();
-  const aliases = [...new Set((input.aliases ?? []).map((a) => a.trim()).filter((a) => a !== ""))];
+  const aliases = normalizeAliases(input.aliases ?? []);
   if (name === "") {
     return { ok: false, envelope: failEnvelope("MISSING_PARAMS", { message: "成员名不能为空。", missing: ["name"] }) };
   }
@@ -133,21 +157,55 @@ export function createMember(db: Db, timezone: string, input: CreateMemberInput)
   if (existing.some((m) => m.name === name)) {
     return { ok: false, envelope: failEnvelope("INVALID_PARAMS", { message: `成员「${name}」已存在。`, field: "name" }) };
   }
-  for (const alias of aliases) {
-    if (existing.some((m) => m.name === alias || m.aliases.includes(alias))) {
-      return {
-        ok: false,
-        envelope: failEnvelope("INVALID_PARAMS", {
-          message: `别名「${alias}」与现有成员的名称或别名冲突,请换一个。`,
-          field: "aliases",
-        }),
-      };
-    }
+  const clash = findAliasConflict(existing, aliases, null);
+  if (clash !== null) {
+    return {
+      ok: false,
+      envelope: failEnvelope("INVALID_PARAMS", {
+        message: `别名「${clash}」与现有成员的名称或别名冲突,请换一个。`,
+        field: "aliases",
+      }),
+    };
   }
   const id = generateId(db, "m", "member", timezone);
   db.prepare("INSERT INTO member (id, name, aliases, created_at) VALUES (?, ?, ?, ?)")
     .run(id, name, JSON.stringify(aliases), new Date().toISOString());
   return { ok: true, member: { id, name, aliases, created_at: new Date().toISOString(), deleted_at: null } };
+}
+
+/**
+ * 管理入口(S6b 管理页用):**改别名**(整体替换该成员的别名列表)。
+ *
+ * 冲突判定复用 `findAliasConflict`(与建成员同一份规则),排除本成员自己 ——
+ * 也就是说"把已软删成员的别名收回来"是允许的,而"抢别人的别名"响亮报错。
+ *
+ * 为什么放在 domain 而不是管理页:别名是**归属解析**的一部分(§4 的 X10),
+ * 它的合法性属于业务规则。管理页与 CLI 都只是入口,谁在页面上另写一份
+ * "看起来像冲突检查"的东西,下一次有人改别名就会绕过它。
+ */
+export function updateMemberAliases(db: Db, ref: string, inputAliases: readonly string[]):
+  | { ok: true; member: MemberRow }
+  | { ok: false; envelope: FailEnvelope } {
+  const r = resolveMemberRef(db, ref);
+  if (!r.ok) {
+    return {
+      ok: false,
+      envelope: failEnvelope("NOT_FOUND", { message: `没有找到成员「${ref}」。`, id: ref }),
+    };
+  }
+  const aliases = normalizeAliases(inputAliases);
+  const clash = findAliasConflict(listActiveMembers(db), aliases, r.member.id);
+  if (clash !== null) {
+    return {
+      ok: false,
+      envelope: failEnvelope("INVALID_PARAMS", {
+        message: `别名「${clash}」与现有成员的名称或别名冲突,请换一个。`,
+        field: "aliases",
+      }),
+    };
+  }
+  setAliases(db, r.member.id, aliases);
+  return { ok: true, member: { ...r.member, aliases } };
 }
 
 /** 成员一律软删(§4);软删后其 token 一并失效(authenticate 里按 deleted_at 判定)。 */

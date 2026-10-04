@@ -49,8 +49,13 @@ export function query(params: Record<string, string | undefined>): string {
   return parts.length === 0 ? "" : `?${parts.join("&")}`;
 }
 
-/** 内联样式。零依赖、零请求:页面不加载任何外部资源(局域网里也不该有 CDN 这回事)。 */
-const STYLE = `
+/**
+ * 内联样式。零依赖、零请求:页面不加载任何外部资源(局域网里也不该有 CDN 这回事)。
+ *
+ * 导出(`export const STYLE`)是因为管理页(`src/admin/pages.ts`)要**复用同一份样式**:
+ * 两套门面渲染在同一台机器的同一个浏览器里,样式不一致只会让人以为进错了站点。
+ */
+export const STYLE = `
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
@@ -76,6 +81,11 @@ const STYLE = `
             margin-right: .4rem; text-decoration: none; }
   .tabs a.on { background: #8883; }
   footer { padding: 0 1rem; opacity: .6; font-size: .8em; }
+  /* 管理页:一次性明文(token / 重置出来的口令)要能被一眼找到、且不会被手滑复制走 */
+  .once { background: #dcfce7; color: #111; padding: .7rem .9rem; border-radius: .4rem;
+          margin: .6rem 0; word-break: break-all; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .warn { background: #fed7aa; color: #111; padding: .6rem .8rem; border-radius: .4rem; margin: .6rem 0; }
+  .card { border: 1px solid #8886; border-radius: .4rem; padding: .6rem .8rem; margin: .8rem 0; }
 `;
 
 /**

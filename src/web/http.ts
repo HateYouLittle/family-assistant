@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import { registerAdminRoutes } from "../admin/http.js";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/db.js";
 import { todayInTz } from "../db/id.js";
@@ -33,10 +34,16 @@ import { renderCalendar, renderLedger, renderTodos, resolveWindow } from "./page
  * 3. 会话 cookie:`HttpOnly` + `SameSite=Lax` + `Path=/`,签名密钥**存库**(迁移 v4)。
  * 4. **所有输出做 HTML 转义** —— 动态值一律经 ./html.ts 的 `h()`。
  * 5. 页面只读:除 `POST /logout` 清 cookie 外**没有任何写路由**,数据一律经 domain 的读函数。
+ *    (S6b 起这个"只读"只约束**查看页自己的那几条路由**;管理页的写路由挂在 `/admin/*` 前缀下,
+ *    见文件末的 `registerAdminRoutes`。)
  * 6. 未登录访问受保护页面 → **302 到 /login 并带原路径**,登录后回跳。
  *
  * ## 为什么导出 `buildWebServer`(而不是只导 listen)
  * 测试用 `app.inject()` 发请求,**不起真实端口**(与 src/mcp/http.ts 同一做法)。
+ *
+ * ## S6b:管理页挂在这同一个 app 上
+ * `registerAdminRoutes` 把 `/admin/*` 注册到**同一个实例** —— 于是管理页与查看页
+ * 共用 `FA_WEB_HOST` 这一个绑定地址,没有第二个监听口(红线:不得把管理页暴露到回环之外)。
  */
 export function buildWebServer(db: Db, config: AppConfig): FastifyInstance {
   const app = Fastify({
@@ -228,6 +235,16 @@ ${q.denied === "1" ? `<div class="denied">登录失败:成员名或密码不对�
     const viewer = currentViewer(req);
     return reply.code(302).header("location", viewer === null ? "/login" : "/todos").send();
   });
+
+  // ─────────────────────────── 管理页(S6b)───────────────────────────
+  //
+  // **注册在同一个 app 上**,所以管理页与查看页共用同一个绑定地址(`FA_WEB_HOST`)——
+  // 没有"管理页独立监听 0.0.0.0"这样的口子(红线)。缺省仍是回环。
+  //
+  // 路由顺序上管理页排在最后:两套门面路径前缀不重叠(`/admin/*` vs `/todos` 等),
+  // 所以顺序不影响路由匹配;但把一个更宽的面板放在后面,读代码时不容易把它
+  // 误当成"查看页也能进的路径"。
+  registerAdminRoutes(app, db, config);
 
   return app;
 }

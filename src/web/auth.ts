@@ -269,13 +269,30 @@ interface ThrottleEntry {
 export class LoginThrottle {
   readonly #entries = new Map<string, ThrottleEntry>();
 
+  /**
+   * 阈值与锁定时长**可覆盖**(缺省 = 查看页的具名常量)。
+   *
+   * 为什么做成参数而不是复制一个类:限速的计数/到期逻辑只有一份是对的
+   * (计数清零、锁定到期、只清成功的那一桶)。管理端(`./admin-auth.ts`)要用**更紧**的
+   * 阈值 —— 它一次登录能换走整库备份,爆炸半径比查看页大得多 —— 但它需要的是
+   * **同一份逻辑、更换的两个数字**,不是第二份实现。复制一份类意味着两边的
+   * "锁定到期后清零"将来只会被改到一处。
+   */
+  readonly #maxFailures: number;
+  readonly #lockoutMs: number;
+
+  constructor(options: { maxFailures?: number; lockoutMs?: number } = {}) {
+    this.#maxFailures = options.maxFailures ?? LOGIN_MAX_FAILURES;
+    this.#lockoutMs = options.lockoutMs ?? LOGIN_LOCKOUT_MS;
+  }
+
   /** 当前还剩多少毫秒才解锁(0 = 未锁定)。过期的锁定顺手清零,让计数重新开始。 */
   remainingMs(key: string, now: number = Date.now()): number {
     const e = this.#entries.get(key);
     if (e === undefined) return 0;
     if (e.lockedUntil > now) return e.lockedUntil - now;
     if (e.lockedUntil !== 0) {
-      // 锁定已过 → 计数清零:再给一次完整的 LOGIN_MAX_FAILURES 次机会。
+      // 锁定已过 → 计数清零:再给一次完整的 maxFailures 次机会。
       this.#entries.set(key, { failures: 0, lockedUntil: 0 });
     }
     return 0;
@@ -285,7 +302,7 @@ export class LoginThrottle {
   recordFailure(key: string, now: number = Date.now()): number {
     const prev = this.#entries.get(key) ?? { failures: 0, lockedUntil: 0 };
     const failures = prev.failures + 1;
-    const lockedUntil = failures >= LOGIN_MAX_FAILURES ? now + LOGIN_LOCKOUT_MS : 0;
+    const lockedUntil = failures >= this.#maxFailures ? now + this.#lockoutMs : 0;
     this.#entries.set(key, { failures, lockedUntil });
     return lockedUntil > now ? lockedUntil - now : 0;
   }
