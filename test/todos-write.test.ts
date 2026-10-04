@@ -439,26 +439,30 @@ describe("restore_deleted(§4 软删可逆)", () => {
     assert.equal(env.id, "t-261001-zzzz");
   });
 
-  it('kind="entry" → INVALID_PARAMS + field=kind,并列出本阶段可用的 kind', () => {
+  it('未接入的 kind → INVALID_PARAMS + field=kind,并列出可用的 kind', () => {
     f = newFixture();
-    // S2 起 "event" 已接入(S1 时这里断言的是 event);未接入的记账仍是 "entry"。
-    const env = restoreDeleted(f.db, f.callers.mama, "entry", "t-261001-zzzz");
+    // S2 起 "event" 已接入、S3 起 "entry" 也接入了;白名单机制本身没变 ——
+    // 未接入的 kind 仍然显式拒绝(宁可显式拒绝,也不实现半套语义)。
+    const env = restoreDeleted(f.db, f.callers.mama, "category", "t-261001-zzzz");
     fail(env);
     assert.equal(env.code, "INVALID_PARAMS");
     assert.equal(env.field, "kind");
-    assert.match(env.message, /暂不支持 kind="entry"/);
+    assert.match(env.message, /暂不支持 kind="category"/);
     assert.match(env.hint ?? "", /kind="todo"/);
+    assert.match(env.hint ?? "", /kind="event"/);
+    assert.match(env.hint ?? "", /kind="entry"/);
   });
 
-  it("工具层同样挡住 kind=entry(INVALID_PARAMS,未知枚举值)", () => {
+  it('kind="entry"(S3 接入)作用在待办 id 上 → NOT_FOUND,不得落库', () => {
     f = newFixture();
     const id = newTodo("mama", { title: "交物业费" });
     ok(deleteTodo(f.db, f.callers.mama, id));
 
     const env = callTool("mama", "restore_deleted", { kind: "entry", id });
     fail(env);
-    assert.equal(env.code, "INVALID_PARAMS");
-    assert.notEqual(rawTodo(id).deleted_at, null, "参数不合规不得落库");
+    // kind 本身是合法的,跨域 id 属于"找不到",不该伪装成"这个 kind 不支持"
+    assert.equal(env.code, "NOT_FOUND");
+    assert.notEqual(rawTodo(id).deleted_at, null, "被拒的调用不得落库");
   });
 
   it("V3/V5/X4:他人条目、未删除 → DENIED(not_visible),话术不得夹带标题(幂等分支不得抢在权限前)", () => {

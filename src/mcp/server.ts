@@ -21,9 +21,11 @@ export function buildMcpServer(db: Db, config: Pick<AppConfig, "timezone">, auth
   const server = new Server(SERVER_INFO, {
     capabilities: { tools: {} },
     instructions:
-      "家庭助手:待办/日程/记账的家庭事务工具(Spike 01 只开放待办与成员)。" +
+      "家庭助手:待办/日程/记账的家庭事务工具(三个域均已接入)。" +
       "说话人身份由连接(token)确定,所有工具都不接受身份参数;" +
-      "涉及归属的参数(owner)先用 list_members 对齐称呼。",
+      "涉及归属的参数(owner / member_id)先用 list_members 对齐称呼。" +
+      "记账域注意三点:金额一律整数分(话术里显示为元);ledger=personal 时 member_id 必须是说话人本人;" +
+      "ledger 与 member_id 创建后不可改(要改请删除后重建)。",
   });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({

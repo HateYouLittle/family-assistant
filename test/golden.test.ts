@@ -29,7 +29,7 @@ describe("工具面 golden(P8)", () => {
     }
   });
 
-  it("S2 范围:恰好 12 个工具(8 个原有 + 日程域 4 个),无任何身份参数形态", () => {
+  it("S3 范围:恰好 19 个工具(12 个原有 + 记账域 7 个),无任何身份参数形态", () => {
     assert.deepEqual(TOOL_DEFINITIONS.map((t) => t.name), [
       "list_members",
       "add_todo",
@@ -42,6 +42,14 @@ describe("工具面 golden(P8)", () => {
       "list_events",
       "update_event",
       "delete_event",
+      "add_category",
+      "list_categories",
+      "add_entry",
+      "list_entries",
+      "summarize_entries",
+      "update_entry",
+      "delete_entry",
+      // restore_deleted 排在最后:它是三域共用的软删逆操作,跟着它服务的域走不如独立收尾
       "restore_deleted",
     ]);
     for (const t of TOOL_DEFINITIONS) {
@@ -80,6 +88,11 @@ describe("工具面 golden(P8)", () => {
       assert.ok(t, `缺少 ${name}`);
       assert.match(t!.description, /DENIED/, `${name} 的 description 未写明拒绝条件`);
     }
+    // S3:update_entry 是第三条 update_*,同样必须含 V7 的固定话术(P8 ④)
+    const updateEntry = TOOL_DEFINITIONS.find((t) => t.name === "update_entry");
+    assert.ok(updateEntry, "缺少 update_entry");
+    assert.match(updateEntry!.description, /归属\/账本不可修改,如需变更请删除后重建/);
+    assert.match(updateEntry!.description, /immutable/);
   });
 
   it("P8 ②:日程域 4 个工具都写出拒绝条件(V1/V3/V8/X3)", () => {
@@ -140,5 +153,54 @@ describe("工具面 golden(P8)", () => {
     // list_events 的 description 不该被这一阶段改动(golden diff 只允许 add_event / update_event 变)
     const listEvents = TOOL_DEFINITIONS.find((t) => t.name === "list_events")!;
     assert.doesNotMatch(listEvents.description, /repeat/, "本阶段不动 list_events 的契约");
+  });
+
+  it("S3:记账域 7 个工具把拒绝条件与 V7 固定话术写进 description(P8 ②④)", () => {
+    const ledgerTools = [
+      "add_category",
+      "list_categories",
+      "add_entry",
+      "list_entries",
+      "summarize_entries",
+      "update_entry",
+      "delete_entry",
+    ];
+    for (const name of ledgerTools) {
+      const t = TOOL_DEFINITIONS.find((x) => x.name === name);
+      assert.ok(t, `缺少 ${name}`);
+      assert.match(t!.description, /示例:/, `${name} 的 description 缺少示例(P8 ③)`);
+      assert.match(t!.description, /说话人由连接确定/, `${name} 未声明说话人不是参数(P7)`);
+      assert.match(t!.description, /[一-龥]/, `${name} 的 description 必须是中文(P8 ①)`);
+    }
+
+    // V4 的记账特例:个人账本只能本人写 —— 模型读不到设计文档,只能读 description(P8 ②)
+    const addEntry = TOOL_DEFINITIONS.find((t) => t.name === "add_entry")!;
+    assert.match(addEntry.description, /个人账本只能本人写/);
+    assert.match(addEntry.description, /DENIED/);
+    // X2 的落点:显式要他人私账是 DENIED,不是空表
+    const listEntries = TOOL_DEFINITIONS.find((t) => t.name === "list_entries")!;
+    assert.match(listEntries.description, /DENIED/);
+    assert.match(listEntries.description, /不是空表/);
+    // group_by=member 必须显式 ledger(设计 §5 的歧义消除)
+    const summarize = TOOL_DEFINITIONS.find((t) => t.name === "summarize_entries")!;
+    assert.match(summarize.description, /group_by="member" 时 ledger 必填/);
+    assert.match(summarize.description, /MISSING_PARAMS/);
+    // 写工具的拒绝条件
+    for (const name of ["update_entry", "delete_entry"]) {
+      const t = TOOL_DEFINITIONS.find((x) => x.name === name)!;
+      assert.match(t.description, /DENIED/, `${name} 的 description 未写明拒绝条件`);
+    }
+    // restore_deleted 在 S3 扩展到 kind="entry"
+    assert.match(TOOL_DEFINITIONS.find((t) => t.name === "restore_deleted")!.description, /"entry"/);
+
+    // 记账域的 schema 一律 strict,且没有身份参数形态(X15)
+    for (const name of ledgerTools) {
+      const t = TOOL_DEFINITIONS.find((x) => x.name === name)!;
+      assert.equal(t.inputSchema.additionalProperties, false, `${name} 的 schema 不是 strict`);
+      const props = (t.inputSchema.properties ?? {}) as Record<string, unknown>;
+      for (const banned of ["as_member", "asMember", "bind_key", "bindKey", "speaker", "caller", "as", "whoami"]) {
+        assert.equal(banned in props, false, `${name} 出现了身份参数 ${banned}`);
+      }
+    }
   });
 });

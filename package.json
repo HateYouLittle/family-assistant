@@ -12,7 +12,7 @@
     "start": "node dist/src/mcp/main.js",
     "dev": "tsx src/mcp/main.ts",
     "admin": "tsx src/cli/admin.ts",
-    "test": "node --import tsx --test test/members.test.ts test/todos.test.ts test/todos-write.test.ts test/events.test.ts test/events-repeat.test.ts test/auth.test.ts test/schemas.test.ts test/golden.test.ts test/tz.test.ts test/migrations.test.ts test/audit.test.ts test/mcp-http.test.ts"
+    "test": "node --import tsx --test test/members.test.ts test/todos.test.ts test/todos-write.test.ts test/events.test.ts test/events-repeat.test.ts test/ledger.test.ts test/auth.test.ts test/schemas.test.ts test/golden.test.ts test/tz.test.ts test/migrations.test.ts test/audit.test.ts test/mcp-http.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0",

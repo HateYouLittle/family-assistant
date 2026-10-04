@@ -711,23 +711,31 @@ describe("delete_event + restore_deleted:软删联动(系列 + 实例)与可逆"
     assert.deepEqual(rawInstance(instanceId), beforeInstance);
   });
 
-  it('kind="entry" 仍 INVALID_PARAMS(S3 再接),不得静默放行', () => {
+  it('未接入的 kind 仍 INVALID_PARAMS(不得静默放行);S3 起 "entry" 已接入,这里用 "note" 占位', () => {
     f = newFixture();
     const { seriesId } = newEvent("mama", { title: "家长会", start: "2031-06-01 09:00" });
     ok(deleteEvent(f.db, f.callers.mama, seriesId));
 
-    const viaDomain = restoreDeleted(f.db, f.callers.mama, "entry", seriesId);
+    // domain 层的 default 分派:未接入的 kind 显式拒绝,而不是"什么都不做"
+    const viaDomain = restoreDeleted(f.db, f.callers.mama, "note", seriesId);
     fail(viaDomain);
     assert.equal(viaDomain.code, "INVALID_PARAMS");
     assert.equal(viaDomain.field, "kind");
-    assert.match(viaDomain.message, /暂不支持 kind="entry"/);
+    assert.match(viaDomain.message, /暂不支持 kind="note"/);
     assert.match(viaDomain.hint ?? "", /kind="event"/);
 
     // 工具层同样挡住(未知枚举值),且不落库
-    const viaTool = callTool("mama", "restore_deleted", { kind: "entry", id: seriesId });
+    const viaTool = callTool("mama", "restore_deleted", { kind: "note", id: seriesId });
     fail(viaTool);
     assert.equal(viaTool.code, "INVALID_PARAMS");
     assert.notEqual(rawSeries(seriesId).deleted_at, null, "参数不合规不得落库");
+
+    // kind="entry"(S3 接入的记账流水)作用在日程 id 上 → NOT_FOUND,而非 INVALID_PARAMS:
+    // 白名单机制按域分派,跨域 id 属于"找不到",不该伪装成"这个 kind 不支持"
+    const crossDomain = callTool("mama", "restore_deleted", { kind: "entry", id: seriesId });
+    fail(crossDomain);
+    assert.equal(crossDomain.code, "NOT_FOUND");
+    assert.notEqual(rawSeries(seriesId).deleted_at, null, "被拒的调用不得落库");
   });
 
   it("工具层 kind=event 可用:恢复成功", () => {

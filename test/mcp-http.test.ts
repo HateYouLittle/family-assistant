@@ -76,29 +76,37 @@ function envelopeOf(result: unknown): { envelope: Record<string, unknown>; isErr
 }
 
 describe("MCP HTTP 端到端", () => {
-  it("有效 token:tools/list 暴露 12 个工具(含 S1 的 4 个写工具与 S2 的日程域 4 个);list_members 走通", async () => {
+  it("有效 token:tools/list 暴露 19 个工具(含 S1 的 4 个写工具、S2 的日程域 4 个与 S3 的记账域 7 个);list_members 走通", async () => {
     const client = await connect(authHeaders(mama, tokenMama));
     try {
       const tools = await client.listTools();
-      assert.equal(tools.tools.length, 12);
+      assert.equal(tools.tools.length, 19);
       assert.deepEqual(
         tools.tools.map((t) => t.name).sort(),
         [
+          "add_category",
+          "add_entry",
           "add_event",
           "add_todo",
           "complete_todo",
+          "delete_entry",
           "delete_event",
           "delete_todo",
+          "list_categories",
+          "list_entries",
           "list_events",
           "list_members",
           "list_todos",
           "reopen_todo",
           "restore_deleted",
+          "summarize_entries",
+          "update_entry",
           "update_event",
           "update_todo",
         ],
       );
-      // S1 的 4 个新写工具 + S2 的 4 个日程工具确实在工具面里(不靠"数量对得上"蒙混)
+      // S1 的 4 个新写工具 + S2 的 4 个日程工具 + S3 的 7 个记账工具
+      // 确实在工具面里(不靠"数量对得上"蒙混)
       for (const name of [
         "update_todo",
         "reopen_todo",
@@ -108,6 +116,13 @@ describe("MCP HTTP 端到端", () => {
         "list_events",
         "update_event",
         "delete_event",
+        "add_category",
+        "list_categories",
+        "add_entry",
+        "list_entries",
+        "summarize_entries",
+        "update_entry",
+        "delete_entry",
       ]) {
         assert.ok(
           tools.tools.some((t) => t.name === name),
@@ -210,21 +225,28 @@ describe("MCP HTTP 端到端", () => {
     const client = await connect({ Authorization: `Bearer ${tokenBaba}` });
     try {
       const listed = (await client.listTools()).tools;
-      assert.equal(listed.length, 12);
-      // 工具面不含身份信息:未带声明头也照样能列全 12 个工具
+      assert.equal(listed.length, 19);
+      // 工具面不含身份信息:未带声明头也照样能列全 19 个工具
       assert.deepEqual(
         listed.map((t) => t.name).sort(),
         [
+          "add_category",
+          "add_entry",
           "add_event",
           "add_todo",
           "complete_todo",
+          "delete_entry",
           "delete_event",
           "delete_todo",
+          "list_categories",
+          "list_entries",
           "list_events",
           "list_members",
           "list_todos",
           "reopen_todo",
           "restore_deleted",
+          "summarize_entries",
+          "update_entry",
           "update_event",
           "update_todo",
         ],

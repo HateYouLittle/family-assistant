@@ -2,18 +2,25 @@
 
 一个给 AI Agent 当后端的家庭事务程序:**待办 / 日程 / 记账**做成 MCP 工具,供 Hermes Agent 调用。程序本身没有对话能力,也不解析自然语言——家人在 QQ/微信里和 Hermes 说话,Hermes 负责理解意图,本程序负责事实:数据、校验、统计与回执话术。
 
-设计方案见 `docs/设计方案.md`(v0.6);当前实现范围是路线图第一步 **Spike 01 · 身份最小闭环**(`docs/spike-01-identity-binding.md`),即 4 个工具 + 按成员的 token 身份绑定。
+设计方案见 `docs/设计方案.md`(v0.6)。**身份最小闭环(Spike 01)已通过**,三个域全部接入:待办 6 个 + 日程 4 个 + 记账 7 个 + `list_members` + `restore_deleted` = **19 个工具**,说话人以按成员的 token 绑定(`docs/spike-01-identity-binding.md`)。
 
-## 当前范围(Spike 01)
+## 当前范围
 
 | 工具 | 说明 |
 |---|---|
-| `list_members()` | 成员名单(name + aliases),供归属参数(owner)解析 |
+| `list_members()` | 成员名单(name + aliases),供归属参数(owner / member_id)解析 |
 | `add_todo(owner?, title, due_date?, notes?)` | 添加待办;owner 指定他人即"代记"(V4) |
 | `list_todos(done?, due_before?, due_after?, q?)` | 只返回本人待办 + 本人代记的待办(V1/V8) |
-| `complete_todo(id)` | 仅限本人待办(V3/V6) |
+| `update_todo(id, …)` / `complete_todo(id)` / `reopen_todo(id)` / `delete_todo(id)` | 仅限本人待办(V3/V6);owner 不可改(V7) |
+| `add_event(owner?, title, start, …)` | owner 缺省 = 全家日程;重复日程写时物化 92 天 + 惰性续期 |
+| `list_events(start, end, scope?)` / `update_event(id, …)` / `delete_event(id)` | 全家日程人人可见;个人日程仅本人(V1/V3/V8) |
+| `add_entry(member_id, ledger?, type, amount_fen, …)` | 金额一律整数分;`ledger=personal` 只能本人写(V4) |
+| `list_entries(start?, end?, member_id?, …)` / `summarize_entries(period?, group_by, …)` | 共享账本全员可见;显式要他人私账返回 `DENIED`(X2) |
+| `update_entry(id, …)` / `delete_entry(id)` | `ledger` 与 `member_id` 不可改(V7) |
+| `add_category(name, kind)` / `list_categories(kind?)` | 分类可缺省(「未分类」在汇总里单列) |
+| `restore_deleted(kind, id)` | `kind ∈ {todo, event, entry}`,软删可逆 |
 
-**核心身份模型(D13)**:说话人不是参数。每位成员一个 Hermes profile + 一个 family token,服务端由 token 反查成员,工具面没有任何身份参数(`as_member` / `bind_key` 会被 `INVALID_PARAMS` 拒绝,即反例 X15)。日程与记账域在 Spike 通过后再实现。
+**核心身份模型(D13)**:说话人不是参数。每位成员一个 Hermes profile + 一个 family token,服务端由 token 反查成员,工具面没有任何身份参数(`as_member` / `bind_key` 会被 `INVALID_PARAMS` 拒绝,即反例 X15)。
 
 ## 运行
 
@@ -86,7 +93,8 @@ src/
   config.ts        环境变量配置(时区显式化,不依赖系统本地时区;身份声明头默认必填)
   db/              openDb(WAL)/ 迁移(v1 成员·token·todo;v2 category·entry·event·audit_log)/ id 生成(时间序前缀)
   domain/          领域层:信封与错误码、authenticate(token→成员)、viewer(可见性判定入口)、
-                   members、todos —— V1/V3/V4/V8/V9 全部收敛在这一层,可脱离 MCP 直接测试
+                   members、todos、events、ledger(分类与流水)、restore ——
+                   V1–V9 全部收敛在这一层,可脱离 MCP 直接测试
   audit/           写操作审计(append-only,记录点在工具层入口;只记关键字段元数据)
   mcp/             zod 严格 schema、工具定义(P8 中文描述)、低级 MCP Server、
                    Fastify Streamable HTTP(127.0.0.1,每请求独立、无状态)
