@@ -76,26 +76,39 @@ function envelopeOf(result: unknown): { envelope: Record<string, unknown>; isErr
 }
 
 describe("MCP HTTP 端到端", () => {
-  it("有效 token:tools/list 暴露 8 个工具(含 S1 新增 4 个写工具);list_members 走通", async () => {
+  it("有效 token:tools/list 暴露 12 个工具(含 S1 的 4 个写工具与 S2 的日程域 4 个);list_members 走通", async () => {
     const client = await connect(authHeaders(mama, tokenMama));
     try {
       const tools = await client.listTools();
-      assert.equal(tools.tools.length, 8);
+      assert.equal(tools.tools.length, 12);
       assert.deepEqual(
         tools.tools.map((t) => t.name).sort(),
         [
+          "add_event",
           "add_todo",
           "complete_todo",
+          "delete_event",
           "delete_todo",
+          "list_events",
           "list_members",
           "list_todos",
           "reopen_todo",
           "restore_deleted",
+          "update_event",
           "update_todo",
         ],
       );
-      // S1 的 4 个新写工具确实在工具面里(不靠"数量对得上"蒙混)
-      for (const name of ["update_todo", "reopen_todo", "delete_todo", "restore_deleted"]) {
+      // S1 的 4 个新写工具 + S2 的 4 个日程工具确实在工具面里(不靠"数量对得上"蒙混)
+      for (const name of [
+        "update_todo",
+        "reopen_todo",
+        "delete_todo",
+        "restore_deleted",
+        "add_event",
+        "list_events",
+        "update_event",
+        "delete_event",
+      ]) {
         assert.ok(
           tools.tools.some((t) => t.name === name),
           `tools/list 缺少 ${name}`,
@@ -197,18 +210,22 @@ describe("MCP HTTP 端到端", () => {
     const client = await connect({ Authorization: `Bearer ${tokenBaba}` });
     try {
       const listed = (await client.listTools()).tools;
-      assert.equal(listed.length, 8);
-      // 工具面不含身份信息:未带声明头也照样能列全 8 个工具
+      assert.equal(listed.length, 12);
+      // 工具面不含身份信息:未带声明头也照样能列全 12 个工具
       assert.deepEqual(
         listed.map((t) => t.name).sort(),
         [
+          "add_event",
           "add_todo",
           "complete_todo",
+          "delete_event",
           "delete_todo",
+          "list_events",
           "list_members",
           "list_todos",
           "reopen_todo",
           "restore_deleted",
+          "update_event",
           "update_todo",
         ],
       );

@@ -439,22 +439,23 @@ describe("restore_deleted(§4 软删可逆)", () => {
     assert.equal(env.id, "t-261001-zzzz");
   });
 
-  it('kind="event" → INVALID_PARAMS + field=kind,并列出本阶段可用的 kind', () => {
+  it('kind="entry" → INVALID_PARAMS + field=kind,并列出本阶段可用的 kind', () => {
     f = newFixture();
-    const env = restoreDeleted(f.db, f.callers.mama, "event", "t-261001-zzzz");
+    // S2 起 "event" 已接入(S1 时这里断言的是 event);未接入的记账仍是 "entry"。
+    const env = restoreDeleted(f.db, f.callers.mama, "entry", "t-261001-zzzz");
     fail(env);
     assert.equal(env.code, "INVALID_PARAMS");
     assert.equal(env.field, "kind");
-    assert.match(env.message, /暂不支持 kind="event"/);
+    assert.match(env.message, /暂不支持 kind="entry"/);
     assert.match(env.hint ?? "", /kind="todo"/);
   });
 
-  it("工具层同样挡住 kind=event(INVALID_PARAMS,未知枚举值)", () => {
+  it("工具层同样挡住 kind=entry(INVALID_PARAMS,未知枚举值)", () => {
     f = newFixture();
     const id = newTodo("mama", { title: "交物业费" });
     ok(deleteTodo(f.db, f.callers.mama, id));
 
-    const env = callTool("mama", "restore_deleted", { kind: "event", id });
+    const env = callTool("mama", "restore_deleted", { kind: "entry", id });
     fail(env);
     assert.equal(env.code, "INVALID_PARAMS");
     assert.notEqual(rawTodo(id).deleted_at, null, "参数不合规不得落库");

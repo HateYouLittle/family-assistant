@@ -3,25 +3,30 @@ import type { ZodTypeAny, z } from "zod";
 import { recordAudit } from "../audit/audit.js";
 import type { Db } from "../db/db.js";
 import type { Envelope } from "../domain/envelope.js";
+import { addEvent, deleteEvent, listEvents, updateEvent } from "../domain/events.js";
 import { listMembersEnvelope } from "../domain/members.js";
 import { restoreDeleted } from "../domain/restore.js";
 import { addTodo, completeTodo, deleteTodo, listTodos, reopenTodo, updateTodo } from "../domain/todos.js";
 import type { Viewer } from "../domain/viewer.js";
 import {
+  addEventSchema,
   addTodoSchema,
   completeTodoSchema,
+  deleteEventSchema,
   deleteTodoSchema,
+  listEventsSchema,
   listMembersSchema,
   listTodosSchema,
   parseToolArgs,
   reopenTodoSchema,
   restoreDeletedSchema,
+  updateEventSchema,
   updateTodoSchema,
 } from "./schemas.js";
 
 /**
- * 工具面(S1:list_members + 待办域 6 个 + restore_deleted = 8 个;
- * 日程/记账域在 S2/S3 接入)。description 即契约(P8):中文、显式写出拒绝条件、
+ * 工具面(S2:list_members + 待办域 6 个 + 日程域 4 个 + restore_deleted = 12 个;
+ * 记账域在 S3 接入)。description 即契约(P8):中文、显式写出拒绝条件、
  * 给一个正确示例、并声明"说话人不是参数"。description 与 schema 变更同等对待,走 golden 测试。
  *
  * 工具层保持薄壳:参数转换 + 话术拼装之外的规则全部在 domain 层。
@@ -173,15 +178,76 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     run: (db, viewer, _tz, args) => deleteTodo(db, viewer, (args as { id: string }).id),
   }),
   defineTool({
+    name: "add_event",
+    description:
+      "添加一条日程。日程分两种:owner 缺省 = **全家日程**(全员可见);指定 owner = 那位成员的个人日程(仅 TA 可见)。" +
+      "指定他人即代记,回执会注明「仅 TA 可见,由你代记」。" +
+      "先调 list_members 确认称呼:成员匹配不到会返回 MISSING_PARAMS(附成员名单),重名会返回 AMBIGUOUS(附候选),此时列出候选让用户确认,不要瞎猜。" +
+      '时间格式随 all_day 走:all_day=true 时 start/end 为纯日期 YYYY-MM-DD;缺省或 false 时为 "YYYY-MM-DD HH:MM"。' +
+      "格式与 all_day 不符、end 早于 start 都返回 INVALID_PARAMS 并指明字段。相对日期(明天、下周三)先自行换算再传。" +
+      '示例:add_event(title="家长会", start="2026-10-05 09:00", end="2026-10-05 10:00", location="学校");代记用 add_event(owner="妈妈", …)。' +
+      "注意:说话人由连接确定,本工具没有、也不接受任何身份参数(传 as_member 之类会被拒绝)。",
+    schema: addEventSchema,
+    // 审计只留关键字段:location/notes 是自由文本,按设计 §6 不入审计。
+    audit: (args) => summarizeArgs(args as Record<string, unknown>, ["owner", "title", "start", "end", "all_day"]),
+    run: (db, viewer, tz, args) => addEvent(db, viewer, tz, args),
+  }),
+  defineTool({
+    name: "list_events",
+    description:
+      "列出时间窗内的日程,返回的是日程实例(每条自带 id 与 series_id)。" +
+      "可见范围:全家日程人人可见(V2);个人日程仅归属人本人可见(V1);你代他人记的个人日程你能看到,但那是 TA 的日程、只能由 TA 本人修改(V8)。" +
+      "scope 缺省 = 全家日程 + 本人的个人日程 + 本人代记的个人日程;scope=\"family\" 只看全家日程;scope=\"mine\" 只看本人名下的个人日程。" +
+      '没有查询他人个人日程的参数形态:传 owner 之类未知字段返回 INVALID_PARAMS,不要换个参数重试 —— 静默空表会让 Agent 误报「TA 那几天没安排」(X3)。' +
+      'start/end 为时间窗,两者都含边界,按与日程时间的重叠判定(仍在进行中的日程也会出现);纯日期的 end 覆盖当天整天。' +
+      '示例:list_events(start="2026-10-05", end="2026-10-05")。' +
+      "注意:说话人由连接确定,没有 owner / as_member 等任何身份参数。",
+    schema: listEventsSchema,
+    run: (db, viewer, tz, args) => listEvents(db, viewer, tz, args),
+  }),
+  defineTool({
+    name: "update_event",
+    description:
+      "修改一条日程的标题、地点、备注与时间。必须先 list_events 拿到精确 id(实例 id 形如 ei-…;系列 id 形如 e-… 也接受),程序不接受模糊指定。" +
+      "置空语义:字段缺省=不改动;显式传 null=清空(location=null 清空地点、notes=null 清空备注、end=null 去掉结束时间)。" +
+      "权限:全家日程任何成员都能改(V3 家庭内互信,回执会标注「已由 <你> 更新」);个人日程仅归属人本人能改;" +
+      "你代记给他人的个人日程改不了,返回 DENIED(reason=not_writable)——那是 TA 的日程,记错了用 delete_event 撤回;别人的个人日程返回 DENIED(not_visible)。" +
+      "两种拒绝都请原样转述、不要重试。时间格式随 all_day 走:all_day=true 时 start/end 为纯日期 YYYY-MM-DD,否则为 \"YYYY-MM-DD HH:MM\";" +
+      "要改时间粒度(全天 ↔ 带时刻)必须同时显式传 all_day,否则返回 INVALID_PARAMS 并指明字段;end 不得早于 start。" +
+      "owner(归属)不可修改:与现值相同的值(成员名/别名/成员 id 都算)幂等放行,供读-改-写时原样回传;" +
+      "与现值不同则返回 DENIED(reason=immutable)——归属/账本不可修改,如需变更请删除后重建(用 delete_event + add_event);" +
+      "把全家日程改成个人日程同样被这条拒绝(X11)。" +
+      '示例:update_event(id="ei-261004-a7k3", start="2026-10-06 14:00", location=null)。' +
+      "注意:说话人由连接确定,本工具没有、也不接受任何身份参数(as_member 之类会被拒绝)。",
+    schema: updateEventSchema,
+    // 审计只留关键字段:location/notes 是自由文本,按设计 §6 不入审计。
+    audit: (args) => summarizeArgs(args as Record<string, unknown>, ["id", "title", "start", "end", "all_day", "owner"]),
+    run: (db, viewer, tz, args) => updateEvent(db, viewer, tz, args),
+  }),
+  defineTool({
+    name: "delete_event",
+    description:
+      "删除一条日程(软删,可恢复)。必须先 list_events 拿到精确 id(实例 id 或系列 id 都接受),程序永远不接受模糊删除。" +
+      "删除按**整个系列**进行:该系列的所有日程实例一并删除(回执里的「系列 e-…」就是 restore_deleted 要用的 id)。" +
+      "权限:全家日程任何成员都能删(V3 家庭内互信,回执标注操作者);个人日程归属人本人可删;" +
+      "你代他人记的日程也可撤回(回执会说明「已撤回你代记的日程」);别人的个人日程一律 DENIED(not_visible),原样转述、不要重试。" +
+      '删除是软删:日程不再出现在 list_events 里,误删可用 restore_deleted(kind="event", id=<系列 id>) 找回。' +
+      '示例:delete_event(id="ei-261004-a7k3")。' +
+      "注意:说话人由连接确定,本工具没有、也不接受任何身份参数。",
+    schema: deleteEventSchema,
+    audit: (args) => summarizeArgs(args as Record<string, unknown>, ["id"]),
+    run: (db, viewer, _tz, args) => deleteEvent(db, viewer, (args as { id: string }).id),
+  }),
+  defineTool({
     name: "restore_deleted",
     description:
       "恢复一条被删除的记录(删除是软删,所以误删都能找回)。必须带精确 id,程序不接受模糊恢复。" +
-      "kind 本阶段只支持 \"todo\"(日程与记账域接入后再扩展该枚举),传其他值返回 INVALID_PARAMS。" +
-      "权限与删除同源:本人的待办本人可恢复;你代他人记的待办你也能恢复(否则代记者删了却救不回来);" +
+      'kind 支持 "todo"(待办)与 "event"(日程,恢复整个系列及其全部实例);记账域接入后再扩展该枚举,传其它值返回 INVALID_PARAMS。' +
+      "权限与删除同源:本人的条目本人可恢复;你代他人记的条目你也能恢复(否则代记者删了却救不回来);" +
       "别人的条目返回 DENIED(not_visible),原样转述、不要重试。" +
       "对未被删除的 id 重复调用无副作用(回执会说明无需恢复)。" +
       "注意:说话人由连接确定,本工具没有、也不接受任何身份参数。" +
-      '示例:restore_deleted(kind="todo", id="t-261004-a7k3")。',
+      '示例:restore_deleted(kind="todo", id="t-261004-a7k3");恢复日程用 restore_deleted(kind="event", id="e-261004-a7k3")。',
     schema: restoreDeletedSchema,
     audit: (args) => summarizeArgs(args as Record<string, unknown>, ["kind", "id"]),
     run: (db, viewer, _tz, args) => {

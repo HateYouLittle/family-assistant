@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isCalendarDate } from "../db/id.js";
 import { failEnvelope, type Envelope } from "../domain/envelope.js";
+import { isRealMoment as isRealEventMoment } from "../domain/events.js";
 
 /**
  * 工具参数 schema(P1/P2/P8)。
@@ -82,13 +83,124 @@ export const deleteTodoSchema = z.strictObject({
   id: z.string().min(1).max(40).describe("待办 id,从 list_todos 的结果里原样复制。软删,可恢复。"),
 });
 
+// ─────────────────────────── 日程域(S2) ───────────────────────────
+
+/**
+ * 日程的时刻串:**形状**校验(格式错、假日历日、时刻越界)在这一层,
+ * **语义**校验(按 all_day 判定该传哪种格式、end ≥ start)在 domain 层
+ * (src/domain/events.ts 的 validateTimes)。
+ *
+ * 所以这里的正则同时接受两种形状:`YYYY-MM-DD` 与 `YYYY-MM-DD HH:MM`。
+ * 为什么不按 all_day 在 schema 里收紧:all_day 与 start/end 是"联合"约束,
+ * 而 zod 的字段级 refine 看不到兄弟字段;真要在 schema 里表达就得 superRefine,
+ * 那样同一个规则会有两份实现。本阶段选择"形状一份、语义一份",语义那份对
+ * 直接调 domain 的调用方同样生效(domain 层不假设上游已校验)。
+ */
+function eventTimeString(label: string) {
+  return z
+    .string()
+    .trim()
+    .min(1, `${label} 不能为空`)
+    .max(40, `${label} 过长(上限 40 字)`)
+    .regex(/^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/, {
+      message: `${label} 格式应为 YYYY-MM-DD(全天日程)或 "YYYY-MM-DD HH:MM"(带时刻,例如 2026-10-05 09:00)`,
+    })
+    .refine((v) => isRealEventMoment(v), {
+      message: `${label} 不是合法的时间(日期须真实存在,时刻须在 00:00-23:59)`,
+    });
+}
+
+export const addEventSchema = z.strictObject({
+  owner: z
+    .string()
+    .min(1, "owner 不能为空")
+    .max(100)
+    .optional()
+    .describe(
+      "归属人:成员名、别名或成员 id。缺省 = 全家日程(全员可见);" +
+        "指定某人 = TA 的个人日程(仅 TA 可见),指定他人即代记,回执会注明「由你代记」。",
+    ),
+  title: z.string().trim().min(1, "title 不能为空").max(200, "title 过长(上限 200 字)").describe("日程标题,一句话。"),
+  start: eventTimeString("start").describe(
+    "开始时间:all_day=true 传纯日期 YYYY-MM-DD,否则传 \"YYYY-MM-DD HH:MM\"。相对日期(明天/下周三)先自行换算再传。",
+  ),
+  end: eventTimeString("end").optional().describe(
+    "结束时间,格式必须与 all_day 一致(同样的两种格式);缺省 = 未定结束时间。end 不得早于 start。",
+  ),
+  all_day: z
+    .boolean()
+    .optional()
+    .describe(
+      "true = 全天日程(start/end 只能是纯日期 YYYY-MM-DD);缺省或 false = 带时刻" +
+        '(start/end 必须为 "YYYY-MM-DD HH:MM")。格式与 all_day 不符返回 INVALID_PARAMS 并指明字段。',
+    ),
+  location: z.string().max(200, "location 过长(上限 200 字)").optional().describe("地点,可缺省。"),
+  notes: z.string().max(2000, "notes 过长(上限 2000 字)").optional().describe("补充备注,可缺省。"),
+});
+
+export const listEventsSchema = z.strictObject({
+  start: eventTimeString("start").describe(
+    '时间窗下界(含边界):纯日期 YYYY-MM-DD 或 "YYYY-MM-DD HH:MM"。按与日程时间的**重叠**判定(跨窗口仍在进行的日程也会出现)。',
+  ),
+  end: eventTimeString("end").describe(
+    '时间窗上界(含边界):纯日期按当天 23:59 算,所以 start=end=某天 就是"那一天"。end 不得早于 start。',
+  ),
+  scope: z
+    .enum(["family", "mine"])
+    .optional()
+    .describe(
+      '"family" = 只看全家日程;"mine" = 只看你自己的个人日程;缺省 = 全家日程 + 你的个人日程 + 你代记给他人的个人日程(V8 查看权)。' +
+        "没有查询他人个人日程的参数形态(V1):传 owner 之类未知字段会返回 INVALID_PARAMS。",
+    ),
+});
+
+export const updateEventSchema = z.strictObject({
+  id: z
+    .string()
+    .min(1)
+    .max(40)
+    .describe("日程 id,从 list_events 的结果里原样复制(实例 id 形如 ei-…;系列 id 形如 e-… 也接受)。"),
+  title: z
+    .string()
+    .trim()
+    .min(1, "title 不能为空")
+    .max(200, "title 过长(上限 200 字)")
+    .optional()
+    .describe("新标题。缺省 = 不改动。"),
+  location: z.string().max(200, "location 过长(上限 200 字)").nullable().optional().describe("新地点。缺省 = 不改动;传 null = 清空地点。"),
+  notes: z.string().max(2000, "notes 过长(上限 2000 字)").nullable().optional().describe("新备注。缺省 = 不改动;传 null = 清空备注。"),
+  start: eventTimeString("start").optional().describe(
+    '新开始时间,格式必须与 all_day 一致。缺省 = 不改动;要改时间粒度(全天 ↔ 带时刻)必须同时显式传 all_day。',
+  ),
+  end: eventTimeString("end").nullable().optional().describe("新结束时间。缺省 = 不改动;传 null = 去掉结束时间。"),
+  all_day: z.boolean().optional().describe("true = 全天、false = 带时刻。缺省 = 不改动;与 start/end 的格式做联合校验。"),
+  owner: z
+    .string()
+    .min(1, "owner 不能为空")
+    .max(100)
+    .optional()
+    .describe(
+      "归属人:仅供读-改-写时原样回传。缺省 = 不传;" +
+        "与现值相同(含别名/成员 id)幂等放行,与现值不同 → DENIED(immutable):归属/账本不可修改,如需变更请删除后重建。" +
+        "把全家日程改成个人日程同样被这条拒绝。",
+    ),
+});
+
+export const deleteEventSchema = z.strictObject({
+  id: z
+    .string()
+    .min(1)
+    .max(40)
+    .describe("日程 id,从 list_events 的结果里原样复制(实例 id 或系列 id 都接受)。软删,可恢复;按整个系列删。"),
+});
+
 export const restoreDeletedSchema = z.strictObject({
-  kind: z.enum(["todo"], {
+  kind: z.enum(["todo", "event"], {
     errorMap: () => ({
-      message: `kind 本阶段只支持 "todo"(日程/记账域接入后再扩展);收到的是非 todo 的值`,
+      message: `kind 本阶段支持 "todo"(待办)与 "event"(日程);记账域接入后再扩展;收到的是其它值`,
     }),
-  }).describe('要恢复的记录类型,本阶段仅 "todo"。'),
-  id: z.string().min(1).max(40).describe("待办 id,原样使用 delete_todo 回执里的 id。"),
+  }).describe('要恢复的记录类型:"todo" = 待办,"event" = 日程(整个系列及其实例)。记账的 "entry" 尚未支持。'),
+  id: z.string().min(1).max(40).describe('记录 id,原样使用 delete 回执里的 id(日程用系列 id,形如 e-…;实例 id 也接受)。'),
 });
 
 export type ListMembersArgs = z.infer<typeof listMembersSchema>;
@@ -98,6 +210,10 @@ export type CompleteTodoArgs = z.infer<typeof completeTodoSchema>;
 export type UpdateTodoArgs = z.infer<typeof updateTodoSchema>;
 export type ReopenTodoArgs = z.infer<typeof reopenTodoSchema>;
 export type DeleteTodoArgs = z.infer<typeof deleteTodoSchema>;
+export type AddEventArgs = z.infer<typeof addEventSchema>;
+export type ListEventsArgs = z.infer<typeof listEventsSchema>;
+export type UpdateEventArgs = z.infer<typeof updateEventSchema>;
+export type DeleteEventArgs = z.infer<typeof deleteEventSchema>;
 export type RestoreDeletedArgs = z.infer<typeof restoreDeletedSchema>;
 
 const IDENTITY_PARAM_HINT = "说话人由连接确定,本工具没有、也不接受任何身份参数。";
