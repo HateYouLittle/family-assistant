@@ -115,4 +115,30 @@ describe("工具面 golden(P8)", () => {
       assert.equal(t.inputSchema.additionalProperties, false, `${t.name} 的 schema 不是 strict`);
     }
   });
+
+  it("S2b:重复日程的契约写在 add_event / update_event 的 description 与 schema 里", () => {
+    const addEvent = TOOL_DEFINITIONS.find((t) => t.name === "add_event")!;
+    const updateEvent = TOOL_DEFINITIONS.find((t) => t.name === "update_event")!;
+    for (const t of [addEvent, updateEvent]) {
+      // ① 写时物化 92 天 + 读时惰性续期
+      assert.match(t.description, /未来 92 天/, `${t.name} 未写明物化 92 天`);
+      assert.match(t.description, /自动续期/, `${t.name} 未写明惰性续期`);
+      // ② N4:改删只作用整系列
+      assert.match(t.description, /整个系列/, `${t.name} 未写明整系列语义`);
+      // ③ repeat_until 的语义(含当天为止)
+      assert.match(t.description, /repeat_until/, `${t.name} 未提 repeat_until`);
+      assert.match(t.description, /含当天为止/, `${t.name} 未写明 repeat_until 含当天为止`);
+      // ④ 非重复日程传 repeat_* 会被拒
+      assert.match(t.description, /非重复日程不接受/, `${t.name} 未写明非重复日程拒绝 repeat_*`);
+      // ⑤ 三个参数都进了 schema(strictObject 之下)
+      const props = (t.inputSchema.properties ?? {}) as Record<string, unknown>;
+      for (const field of ["repeat", "repeat_interval", "repeat_until"]) {
+        assert.ok(field in props, `${t.name} 的 schema 少了 ${field}`);
+        assert.ok(!(t.inputSchema.required as string[] | undefined)?.includes(field), `${t.name} 的 ${field} 不该是必填`);
+      }
+    }
+    // list_events 的 description 不该被这一阶段改动(golden diff 只允许 add_event / update_event 变)
+    const listEvents = TOOL_DEFINITIONS.find((t) => t.name === "list_events")!;
+    assert.doesNotMatch(listEvents.description, /repeat/, "本阶段不动 list_events 的契约");
+  });
 });

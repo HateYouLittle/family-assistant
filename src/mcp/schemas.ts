@@ -110,6 +110,28 @@ function eventTimeString(label: string) {
     });
 }
 
+/**
+ * 重复规则三个参数(S2b)。**形状校验**在这里,**语义校验**(none 不收这两个参数、
+ * repeat_until 早于 start、间隔大到窗口里一次都没有)在 domain 层
+ * (src/domain/events.ts 的 resolveRepeatRule),与时间参数同一套分工。
+ */
+const repeatEnum = z.enum(["none", "daily", "weekly", "monthly"], {
+  errorMap: () => ({
+    message: 'repeat 只支持 "none"(不重复,缺省)、"daily"(每天)、"weekly"(每周)、"monthly"(每月);收到的是其它值',
+  }),
+});
+
+const repeatInterval = z
+  .number()
+  .int("repeat_interval 必须是整数")
+  .min(1, "repeat_interval 至少为 1")
+  .max(366, "repeat_interval 至多 366(约一年)");
+
+const REPEAT_RULE_NOTE =
+  "重复日程在创建时就按规则把**未来 92 天**展开成多条日程(list_events 返回的就是其中一条);" +
+  "读到已展开范围之外时程序会自动续期,所以不必(也无法)手工补齐。" +
+  "重复日程不支持只改其中一次:修改与删除都作用于**整个系列**。";
+
 export const addEventSchema = z.strictObject({
   owner: z
     .string()
@@ -122,7 +144,8 @@ export const addEventSchema = z.strictObject({
     ),
   title: z.string().trim().min(1, "title 不能为空").max(200, "title 过长(上限 200 字)").describe("日程标题,一句话。"),
   start: eventTimeString("start").describe(
-    "开始时间:all_day=true 传纯日期 YYYY-MM-DD,否则传 \"YYYY-MM-DD HH:MM\"。相对日期(明天/下周三)先自行换算再传。",
+    "开始时间:all_day=true 传纯日期 YYYY-MM-DD,否则传 \"YYYY-MM-DD HH:MM\"。相对日期(明天/下周三)先自行换算再传。" +
+      "重复日程里它是**首次**发生的时间,后续按 repeat 推。",
   ),
   end: eventTimeString("end").optional().describe(
     "结束时间,格式必须与 all_day 一致(同样的两种格式);缺省 = 未定结束时间。end 不得早于 start。",
@@ -136,6 +159,20 @@ export const addEventSchema = z.strictObject({
     ),
   location: z.string().max(200, "location 过长(上限 200 字)").optional().describe("地点,可缺省。"),
   notes: z.string().max(2000, "notes 过长(上限 2000 字)").optional().describe("补充备注,可缺省。"),
+  repeat: repeatEnum.optional().describe(
+    '重复规则:缺省或 "none" = 单次日程;"daily" / "weekly" / "monthly" = 每天 / 每周 / 每月重复。' + REPEAT_RULE_NOTE,
+  ),
+  repeat_interval: repeatInterval.optional().describe(
+    '每隔几个单位重复一次,正整数,缺省 1。repeat="weekly" + 2 = 每两周,repeat="daily" + 2 = 每两天。' +
+      'repeat="none" 时传它返回 INVALID_PARAMS(非重复日程不接受这个参数)。',
+  ),
+  repeat_until: dateString("repeat_until")
+    .optional()
+    .describe(
+      "重复截止日,纯日期 YYYY-MM-DD,**含当天为止**不再生成新日程;缺省 = 一直重复。" +
+        "必须不早于 start,否则返回 INVALID_PARAMS(那样一次都不会发生)。" +
+        'repeat="none" 时传它返回 INVALID_PARAMS(非重复日程不接受这个参数)。',
+    ),
 });
 
 export const listEventsSchema = z.strictObject({
@@ -170,10 +207,28 @@ export const updateEventSchema = z.strictObject({
   location: z.string().max(200, "location 过长(上限 200 字)").nullable().optional().describe("新地点。缺省 = 不改动;传 null = 清空地点。"),
   notes: z.string().max(2000, "notes 过长(上限 2000 字)").nullable().optional().describe("新备注。缺省 = 不改动;传 null = 清空备注。"),
   start: eventTimeString("start").optional().describe(
-    '新开始时间,格式必须与 all_day 一致。缺省 = 不改动;要改时间粒度(全天 ↔ 带时刻)必须同时显式传 all_day。',
+    '新开始时间,格式必须与 all_day 一致。缺省 = 不改动;要改时间粒度(全天 ↔ 带时刻)必须同时显式传 all_day。' +
+      "重复日程里它是新的首次时间,**整个系列**按新时间重建。",
   ),
   end: eventTimeString("end").nullable().optional().describe("新结束时间。缺省 = 不改动;传 null = 去掉结束时间。"),
   all_day: z.boolean().optional().describe("true = 全天、false = 带时刻。缺省 = 不改动;与 start/end 的格式做联合校验。"),
+  repeat: repeatEnum.optional().describe(
+    '重复规则:缺省 = 不改动。传 "none" = 改成单次日程(折叠):保留接下来最早的那一次,其余未来的展开收起;' +
+      "整个系列都在过去时不再新建(回执会说明这个系列没有更晚的一次)。" +
+      "重复日程**不支持只改其中一次**:改时间或改规则都作用于整个系列,尚未发生的日程按新规则重建," +
+      "已经过去的那几次原样保留(历史不被改写)。",
+  ),
+  repeat_interval: repeatInterval.optional().describe(
+    "新的重复间隔,正整数,缺省 = 不改动。" +
+      'repeat="none" 时传它返回 INVALID_PARAMS(非重复日程不接受这个参数)。',
+  ),
+  repeat_until: dateString("repeat_until")
+    .nullable()
+    .optional()
+    .describe(
+      "新的重复截止日 YYYY-MM-DD(含当天为止);缺省 = 不改动;传 null = 去掉截止日。" +
+        'repeat="none" 时传它返回 INVALID_PARAMS。',
+    ),
   owner: z
     .string()
     .min(1, "owner 不能为空")

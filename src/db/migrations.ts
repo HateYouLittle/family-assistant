@@ -4,6 +4,8 @@ import type { Db } from "./db.js";
  * 迁移按序号递增、只追加。正式 schema 的 member / api_token / todo 部分
  * (设计方案 §4)在 v1;event / entry / category / audit_log 在 v2 一次建全,
  * 不回填改写 v1——既有库上跑 migrate() 即叠加。
+ * v3(S2b)只**追加约束**:event_instance 的 UNIQUE(series_id, start),
+ * 给重复日程的惰性续期兜底幂等(表结构本身不变,既有库叠加即可)。
  */
 const MIGRATIONS: readonly { id: number; name: string; sql: string }[] = [
   {
@@ -141,6 +143,24 @@ const MIGRATIONS: readonly { id: number; name: string; sql: string }[] = [
         result_code  TEXT NOT NULL,
         ok           INTEGER NOT NULL
       );
+    `,
+  },
+  {
+    id: 3,
+    name: "event_instance: UNIQUE(series_id, start)(重复日程续期幂等)",
+    sql: `
+      -- 同一系列里的"同一次"只允许有一条:这是重复日程续期幂等的**结构性**保证。
+      --
+      -- 为什么 v2 的表结构不够(S2b 裁决):
+      -- v2 只给了 idx_event_instance_start / idx_event_instance_owner_start 两个普通索引,
+      -- 两者都不约束重复。续期是**写在读路径上的写**(设计 §4),会被重试(失败后再读同一
+      -- 窗口)、也可能被两个进程同时触发;若只靠"生成前查重"这种代码约定,将来任何一个
+      -- 续期入口忘了查重(或两次续期交错),重复的行会**静默**落进库 —— 家人的日历上出现
+      -- 两条一模一样的日程,而没有任何约束会拦下它,事后也查不出是哪一步写重了。
+      -- 把幂等从"代码约定"提到 schema 才算真的兜住。
+      -- 配合 INSERT OR IGNORE:重名是**跳过**而不是抛错 —— 读路径上的写一旦抛错就变成
+      -- 降级返回,不该由一条内部约束去触发它。
+      CREATE UNIQUE INDEX idx_event_instance_series_start ON event_instance(series_id, start);
     `,
   },
 ];

@@ -194,7 +194,7 @@
   },
   {
     "name": "add_event",
-    "description": "添加一条日程。日程分两种:owner 缺省 = **全家日程**(全员可见);指定 owner = 那位成员的个人日程(仅 TA 可见)。指定他人即代记,回执会注明「仅 TA 可见,由你代记」。先调 list_members 确认称呼:成员匹配不到会返回 MISSING_PARAMS(附成员名单),重名会返回 AMBIGUOUS(附候选),此时列出候选让用户确认,不要瞎猜。时间格式随 all_day 走:all_day=true 时 start/end 为纯日期 YYYY-MM-DD;缺省或 false 时为 \"YYYY-MM-DD HH:MM\"。格式与 all_day 不符、end 早于 start 都返回 INVALID_PARAMS 并指明字段。相对日期(明天、下周三)先自行换算再传。示例:add_event(title=\"家长会\", start=\"2026-10-05 09:00\", end=\"2026-10-05 10:00\", location=\"学校\");代记用 add_event(owner=\"妈妈\", …)。注意:说话人由连接确定,本工具没有、也不接受任何身份参数(传 as_member 之类会被拒绝)。",
+    "description": "添加一条日程。日程分两种:owner 缺省 = **全家日程**(全员可见);指定 owner = 那位成员的个人日程(仅 TA 可见)。指定他人即代记,回执会注明「仅 TA 可见,由你代记」。先调 list_members 确认称呼:成员匹配不到会返回 MISSING_PARAMS(附成员名单),重名会返回 AMBIGUOUS(附候选),此时列出候选让用户确认,不要瞎猜。时间格式随 all_day 走:all_day=true 时 start/end 为纯日期 YYYY-MM-DD;缺省或 false 时为 \"YYYY-MM-DD HH:MM\"。格式与 all_day 不符、end 早于 start 都返回 INVALID_PARAMS 并指明字段。相对日期(明天、下周三)先自行换算再传。重复日程(repeat=\"daily\"/\"weekly\"/\"monthly\",repeat_interval=每隔几个单位,repeat_until=截止日):创建时按规则把**未来 92 天**展开成多条日程,回执写明展开到哪一天;list_events 读到已展开范围之外时程序自动续期(续期失败时读照常返回,并在回执里说明只展开到哪一天),所以不必手工补齐。重复日程的修改与删除只作用于**整个系列**,不支持只改其中一次。repeat_until 是纯日期 YYYY-MM-DD 且**含当天为止**;早于 start(或早于今天、一次都不会发生)返回 INVALID_PARAMS;repeat=\"none\"(缺省)时传 repeat_interval / repeat_until 也返回 INVALID_PARAMS(非重复日程不接受这两个参数)。示例:add_event(title=\"家长会\", start=\"2026-10-05 09:00\", end=\"2026-10-05 10:00\", location=\"学校\");每周三游泳用 add_event(title=\"游泳\", start=\"2026-10-07 19:00\", repeat=\"weekly\", repeat_until=\"2026-12-31\");代记用 add_event(owner=\"妈妈\", …)。注意:说话人由连接确定,本工具没有、也不接受任何身份参数(传 as_member 之类会被拒绝)。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -215,7 +215,7 @@
           "minLength": 1,
           "maxLength": 40,
           "pattern": "^\\d{4}-\\d{2}-\\d{2}( \\d{2}:\\d{2})?$",
-          "description": "开始时间:all_day=true 传纯日期 YYYY-MM-DD,否则传 \"YYYY-MM-DD HH:MM\"。相对日期(明天/下周三)先自行换算再传。"
+          "description": "开始时间:all_day=true 传纯日期 YYYY-MM-DD,否则传 \"YYYY-MM-DD HH:MM\"。相对日期(明天/下周三)先自行换算再传。重复日程里它是**首次**发生的时间,后续按 repeat 推。"
         },
         "end": {
           "type": "string",
@@ -237,6 +237,27 @@
           "type": "string",
           "maxLength": 2000,
           "description": "补充备注,可缺省。"
+        },
+        "repeat": {
+          "type": "string",
+          "enum": [
+            "none",
+            "daily",
+            "weekly",
+            "monthly"
+          ],
+          "description": "重复规则:缺省或 \"none\" = 单次日程;\"daily\" / \"weekly\" / \"monthly\" = 每天 / 每周 / 每月重复。重复日程在创建时就按规则把**未来 92 天**展开成多条日程(list_events 返回的就是其中一条);读到已展开范围之外时程序会自动续期,所以不必(也无法)手工补齐。重复日程不支持只改其中一次:修改与删除都作用于**整个系列**。"
+        },
+        "repeat_interval": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 366,
+          "description": "每隔几个单位重复一次,正整数,缺省 1。repeat=\"weekly\" + 2 = 每两周,repeat=\"daily\" + 2 = 每两天。repeat=\"none\" 时传它返回 INVALID_PARAMS(非重复日程不接受这个参数)。"
+        },
+        "repeat_until": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "重复截止日,纯日期 YYYY-MM-DD,**含当天为止**不再生成新日程;缺省 = 一直重复。必须不早于 start,否则返回 INVALID_PARAMS(那样一次都不会发生)。repeat=\"none\" 时传它返回 INVALID_PARAMS(非重复日程不接受这个参数)。"
         }
       },
       "required": [
@@ -286,7 +307,7 @@
   },
   {
     "name": "update_event",
-    "description": "修改一条日程的标题、地点、备注与时间。必须先 list_events 拿到精确 id(实例 id 形如 ei-…;系列 id 形如 e-… 也接受),程序不接受模糊指定。置空语义:字段缺省=不改动;显式传 null=清空(location=null 清空地点、notes=null 清空备注、end=null 去掉结束时间)。权限:全家日程任何成员都能改(V3 家庭内互信,回执会标注「已由 <你> 更新」);个人日程仅归属人本人能改;你代记给他人的个人日程改不了,返回 DENIED(reason=not_writable)——那是 TA 的日程,记错了用 delete_event 撤回;别人的个人日程返回 DENIED(not_visible)。两种拒绝都请原样转述、不要重试。时间格式随 all_day 走:all_day=true 时 start/end 为纯日期 YYYY-MM-DD,否则为 \"YYYY-MM-DD HH:MM\";要改时间粒度(全天 ↔ 带时刻)必须同时显式传 all_day,否则返回 INVALID_PARAMS 并指明字段;end 不得早于 start。owner(归属)不可修改:与现值相同的值(成员名/别名/成员 id 都算)幂等放行,供读-改-写时原样回传;与现值不同则返回 DENIED(reason=immutable)——归属/账本不可修改,如需变更请删除后重建(用 delete_event + add_event);把全家日程改成个人日程同样被这条拒绝(X11)。示例:update_event(id=\"ei-261004-a7k3\", start=\"2026-10-06 14:00\", location=null)。注意:说话人由连接确定,本工具没有、也不接受任何身份参数(as_member 之类会被拒绝)。",
+    "description": "修改一条日程的标题、地点、备注与时间。必须先 list_events 拿到精确 id(实例 id 形如 ei-…;系列 id 形如 e-… 也接受),程序不接受模糊指定。置空语义:字段缺省=不改动;显式传 null=清空(location=null 清空地点、notes=null 清空备注、end=null 去掉结束时间)。权限:全家日程任何成员都能改(V3 家庭内互信,回执会标注「已由 <你> 更新」);个人日程仅归属人本人能改;你代记给他人的个人日程改不了,返回 DENIED(reason=not_writable)——那是 TA 的日程,记错了用 delete_event 撤回;别人的个人日程返回 DENIED(not_visible)。两种拒绝都请原样转述、不要重试。时间格式随 all_day 走:all_day=true 时 start/end 为纯日期 YYYY-MM-DD,否则为 \"YYYY-MM-DD HH:MM\";要改时间粒度(全天 ↔ 带时刻)必须同时显式传 all_day,否则返回 INVALID_PARAMS 并指明字段;end 不得早于 start。owner(归属)不可修改:与现值相同的值(成员名/别名/成员 id 都算)幂等放行,供读-改-写时原样回传;与现值不同则返回 DENIED(reason=immutable)——归属/账本不可修改,如需变更请删除后重建(用 delete_event + add_event);把全家日程改成个人日程同样被这条拒绝(X11)。重复日程:repeat / repeat_interval / repeat_until 缺省=不改动,可改重复形态;重复日程**不支持只改其中一次**,改 start / all_day / repeat* 都作用于**整个系列** —— 尚未发生的日程按新规则重新展开未来 92 天(回执会写明重建了多少次、展开到哪天),更远的日程由 list_events 自动续期;严格早于今天的那些次原样保留(历史不被改写);标题/地点/备注则同步到系列的每一次。repeat=\"none\" = 折叠成\"就一次\":保留接下来最早的那一次(沿用它自己原来的时间),其余未来的展开收起,整个系列都在过去时不新建、回执说明「这个系列没有更晚的一次了」;已经发生过的那些次一律保留,不会被删掉。非重复日程不接受 repeat_interval / repeat_until(传了返回 INVALID_PARAMS);repeat_until 是纯日期 YYYY-MM-DD 且**含当天为止**(早于 start 同样返回 INVALID_PARAMS)。示例:update_event(id=\"ei-261004-a7k3\", start=\"2026-10-06 14:00\", location=null);每周改成每天用 update_event(id=\"ei-261004-a7k3\", repeat=\"daily\")。注意:说话人由连接确定,本工具没有、也不接受任何身份参数(as_member 之类会被拒绝)。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -331,7 +352,7 @@
           "minLength": 1,
           "maxLength": 40,
           "pattern": "^\\d{4}-\\d{2}-\\d{2}( \\d{2}:\\d{2})?$",
-          "description": "新开始时间,格式必须与 all_day 一致。缺省 = 不改动;要改时间粒度(全天 ↔ 带时刻)必须同时显式传 all_day。"
+          "description": "新开始时间,格式必须与 all_day 一致。缺省 = 不改动;要改时间粒度(全天 ↔ 带时刻)必须同时显式传 all_day。重复日程里它是新的首次时间,**整个系列**按新时间重建。"
         },
         "end": {
           "anyOf": [
@@ -350,6 +371,34 @@
         "all_day": {
           "type": "boolean",
           "description": "true = 全天、false = 带时刻。缺省 = 不改动;与 start/end 的格式做联合校验。"
+        },
+        "repeat": {
+          "type": "string",
+          "enum": [
+            "none",
+            "daily",
+            "weekly",
+            "monthly"
+          ],
+          "description": "重复规则:缺省 = 不改动。传 \"none\" = 改成单次日程(折叠):保留接下来最早的那一次,其余未来的展开收起;整个系列都在过去时不再新建(回执会说明这个系列没有更晚的一次)。重复日程**不支持只改其中一次**:改时间或改规则都作用于整个系列,尚未发生的日程按新规则重建,已经过去的那几次原样保留(历史不被改写)。"
+        },
+        "repeat_interval": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 366,
+          "description": "新的重复间隔,正整数,缺省 = 不改动。repeat=\"none\" 时传它返回 INVALID_PARAMS(非重复日程不接受这个参数)。"
+        },
+        "repeat_until": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "新的重复截止日 YYYY-MM-DD(含当天为止);缺省 = 不改动;传 null = 去掉截止日。repeat=\"none\" 时传它返回 INVALID_PARAMS。"
         },
         "owner": {
           "type": "string",

@@ -31,6 +31,11 @@ import {
  *
  * 工具层保持薄壳:参数转换 + 话术拼装之外的规则全部在 domain 层。
  * 说话人以 Viewer 形态从上层传进来(连接身份),工具面没有身份参数、也不感知身份。
+ *
+ * 审计纪律(S2b 复核):**有 audit 字段即视为写操作**,成功与失败都留一行。
+ * list_events 的**惰性续期是续期写,不是读** —— 它由读触发、不经用户发起,
+ * 所以不单独记审计(否则一次查日历会在审计里留下一串"写",R1/R6 的追溯会被噪声淹没);
+ * 用户真正发起的写(add_event / update_event / delete_event / restore_deleted)仍各留一行。
  */
 
 export interface ToolDefinition {
@@ -185,11 +190,29 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       "先调 list_members 确认称呼:成员匹配不到会返回 MISSING_PARAMS(附成员名单),重名会返回 AMBIGUOUS(附候选),此时列出候选让用户确认,不要瞎猜。" +
       '时间格式随 all_day 走:all_day=true 时 start/end 为纯日期 YYYY-MM-DD;缺省或 false 时为 "YYYY-MM-DD HH:MM"。' +
       "格式与 all_day 不符、end 早于 start 都返回 INVALID_PARAMS 并指明字段。相对日期(明天、下周三)先自行换算再传。" +
-      '示例:add_event(title="家长会", start="2026-10-05 09:00", end="2026-10-05 10:00", location="学校");代记用 add_event(owner="妈妈", …)。' +
+      "重复日程(repeat=\"daily\"/\"weekly\"/\"monthly\",repeat_interval=每隔几个单位,repeat_until=截止日):" +
+      "创建时按规则把**未来 92 天**展开成多条日程,回执写明展开到哪一天;" +
+      "list_events 读到已展开范围之外时程序自动续期(续期失败时读照常返回,并在回执里说明只展开到哪一天),所以不必手工补齐。" +
+      "重复日程的修改与删除只作用于**整个系列**,不支持只改其中一次。" +
+      "repeat_until 是纯日期 YYYY-MM-DD 且**含当天为止**;早于 start(或早于今天、一次都不会发生)返回 INVALID_PARAMS;" +
+      "repeat=\"none\"(缺省)时传 repeat_interval / repeat_until 也返回 INVALID_PARAMS(非重复日程不接受这两个参数)。" +
+      '示例:add_event(title="家长会", start="2026-10-05 09:00", end="2026-10-05 10:00", location="学校");' +
+      '每周三游泳用 add_event(title="游泳", start="2026-10-07 19:00", repeat="weekly", repeat_until="2026-12-31");' +
+      '代记用 add_event(owner="妈妈", …)。' +
       "注意:说话人由连接确定,本工具没有、也不接受任何身份参数(传 as_member 之类会被拒绝)。",
     schema: addEventSchema,
     // 审计只留关键字段:location/notes 是自由文本,按设计 §6 不入审计。
-    audit: (args) => summarizeArgs(args as Record<string, unknown>, ["owner", "title", "start", "end", "all_day"]),
+    audit: (args) =>
+      summarizeArgs(args as Record<string, unknown>, [
+        "owner",
+        "title",
+        "start",
+        "end",
+        "all_day",
+        "repeat",
+        "repeat_interval",
+        "repeat_until",
+      ]),
     run: (db, viewer, tz, args) => addEvent(db, viewer, tz, args),
   }),
   defineTool({
@@ -217,11 +240,32 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       "owner(归属)不可修改:与现值相同的值(成员名/别名/成员 id 都算)幂等放行,供读-改-写时原样回传;" +
       "与现值不同则返回 DENIED(reason=immutable)——归属/账本不可修改,如需变更请删除后重建(用 delete_event + add_event);" +
       "把全家日程改成个人日程同样被这条拒绝(X11)。" +
-      '示例:update_event(id="ei-261004-a7k3", start="2026-10-06 14:00", location=null)。' +
+      "重复日程:repeat / repeat_interval / repeat_until 缺省=不改动,可改重复形态;" +
+      "重复日程**不支持只改其中一次**,改 start / all_day / repeat* 都作用于**整个系列** —— " +
+      "尚未发生的日程按新规则重新展开未来 92 天(回执会写明重建了多少次、展开到哪天)," +
+      "更远的日程由 list_events 自动续期;严格早于今天的那些次原样保留(历史不被改写);" +
+      "标题/地点/备注则同步到系列的每一次。" +
+      'repeat="none" = 折叠成"就一次":保留接下来最早的那一次(沿用它自己原来的时间),其余未来的展开收起,' +
+      '整个系列都在过去时不新建、回执说明「这个系列没有更晚的一次了」;' +
+      "已经发生过的那些次一律保留,不会被删掉。" +
+      '非重复日程不接受 repeat_interval / repeat_until(传了返回 INVALID_PARAMS);repeat_until 是纯日期 YYYY-MM-DD 且**含当天为止**(早于 start 同样返回 INVALID_PARAMS)。' +
+      '示例:update_event(id="ei-261004-a7k3", start="2026-10-06 14:00", location=null);' +
+      '每周改成每天用 update_event(id="ei-261004-a7k3", repeat="daily")。' +
       "注意:说话人由连接确定,本工具没有、也不接受任何身份参数(as_member 之类会被拒绝)。",
     schema: updateEventSchema,
     // 审计只留关键字段:location/notes 是自由文本,按设计 §6 不入审计。
-    audit: (args) => summarizeArgs(args as Record<string, unknown>, ["id", "title", "start", "end", "all_day", "owner"]),
+    audit: (args) =>
+      summarizeArgs(args as Record<string, unknown>, [
+        "id",
+        "title",
+        "start",
+        "end",
+        "all_day",
+        "owner",
+        "repeat",
+        "repeat_interval",
+        "repeat_until",
+      ]),
     run: (db, viewer, tz, args) => updateEvent(db, viewer, tz, args),
   }),
   defineTool({
