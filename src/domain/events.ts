@@ -250,7 +250,7 @@ function timeKey(value: string, isEnd: boolean): string {
 }
 
 /** 话术里的时间:全天 / 带时刻 / 跨天 三种形状。 */
-function describeTime(start: string, end: string | null, allDay: boolean): string {
+export function describeTime(start: string, end: string | null, allDay: boolean): string {
   if (allDay) return end !== null && end !== start ? `全天 ${start} 至 ${end}` : `全天 ${start}`;
   if (end === null) return `${start} 起`;
   return end.slice(0, DATE_LEN) === start.slice(0, DATE_LEN) ? `${start}–${end.slice(11)}` : `${start} 至 ${end}`;
@@ -818,7 +818,7 @@ const VISIBLE_REPEATING_SERIES = `
   WHERE s.deleted_at IS NULL AND s.repeat != 'none' AND (
 `;
 
-function visibleRepeatingSeries(db: Db, viewer: Viewer, scope: EventScope | undefined): RepeatingSeriesRow[] {
+function visibleRepeatingSeries(db: Db, viewer: Viewer, scope: VisibilityScope | undefined): RepeatingSeriesRow[] {
   const { where, params } = visibilityWhere("s", scope, viewer);
   return db.prepare(`${VISIBLE_REPEATING_SERIES}${where}) ORDER BY s.created_at, s.id`).all(...params) as RepeatingSeriesRow[];
 }
@@ -870,7 +870,7 @@ function renewRepeatingSeries(
   viewer: Viewer,
   timezone: string,
   horizonDay: string,
-  scope: EventScope | undefined,
+  scope: VisibilityScope | undefined,
 ): RenewalReport {
   const today = todayInTz(timezone);
   let degraded = false;
@@ -1201,16 +1201,27 @@ const LIST_INSTANCES = `
 `;
 
 /**
- * scope → SQL 条件。alias 让同一套可见性口径能用在两处:读实例(LIST_INSTANCES,别名 l)
- * 与续期时挑可见的重复系列(VISIBLE_REPEATING_SERIES,别名 s)。
- * 两处共用一份实现,是为了让"读到的"与"被续期写到的"永远是同一个可见集合。
+ * 可见范围的内部口径。`EventScope`("family" / "mine")是 list_events 的**公开参数**取值;
+ * `"family_or_mine"` 只供 get_today 在域内复用同一份实现(它不对应任何参数,
+ * 所以模型没有任何途径用它去要"别人的个人日程")。
  */
-function visibilityWhere(alias: string, scope: EventScope | undefined, viewer: Viewer): { where: string; params: unknown[] } {
+export type VisibilityScope = EventScope | "family_or_mine";
+
+/**
+ * scope → SQL 条件。alias 让同一套可见性口径能用在三处:读实例(LIST_INSTANCES,别名 l)、
+ * 读某一天的日程(listEventsOnDay)、续期时挑可见的重复系列(VISIBLE_REPEATING_SERIES,别名 s)。
+ * 三处共用一份实现,是为了让"读到的"与"被续期写到的"永远是同一个可见集合。
+ */
+function visibilityWhere(alias: string, scope: VisibilityScope | undefined, viewer: Viewer): { where: string; params: unknown[] } {
   // "个人日程归我" 与 "我代记的个人日程"分开写。
   const mine = `${alias}.owner_id = ?`;
   const delegated = `(${alias}.created_by = ? AND ${alias}.owner_id IS NOT NULL AND ${alias}.owner_id != ?)`;
   if (scope === "family") return { where: `${alias}.owner_id IS NULL`, params: [] };
   if (scope === "mine") return { where: mine, params: [viewer.memberId] };
+  // get_today 的口径:全家日程 + 本人的个人日程,不含"我代记的他人个人日程"。
+  if (scope === "family_or_mine") {
+    return { where: `(${alias}.owner_id IS NULL OR ${mine})`, params: [viewer.memberId] };
+  }
   return {
     where: `(${alias}.owner_id IS NULL OR ${mine} OR ${delegated})`,
     params: [viewer.memberId, viewer.memberId, viewer.memberId],
@@ -1277,6 +1288,57 @@ export function listEvents(db: Db, viewer: Viewer, timezone: string, input: List
     return okEnvelope({ family: [], mine: [], delegated: [] }, `${windowText} 没有日程。${note}`);
   }
   return okEnvelope(data, `${windowText}:${parts.join("。")}。${note}`);
+}
+
+// ─────────────────────────── 某一天的日程(get_today 的数据源) ───────────────────────────
+
+export interface DayEvents {
+  /** 全家日程(owner_id 为空,V2 全员可见)。 */
+  family: EventView[];
+  /** 本人的个人日程(owner_id = 说话人,V1)。 */
+  mine: EventView[];
+  /**
+   * 续期降级的话术尾巴(平时是空串)。
+   * get_today 同样会触发惰性续期 —— 「今天的日程」里少了一条每天/每周重复的日程,
+   * 比多一句解释更糟,所以这里与 list_events 用同一套续期与降级说明。
+   */
+  note: string;
+}
+
+/**
+ * 取**某一天**(日历日)的日程实例,按与这一天有重叠判定、边界含端点。
+ *
+ * ## 可见范围为什么是"全家 + 本人",而不是 list_events 的缺省口径
+ * list_events 缺省还含"我代记的他人个人日程"(V8 的查看权);**get_today 不含**。
+ * 理由:那一块回答的是"我今天有什么事",代记者看到的是别人家的私人安排,把它混进
+ * "我的今天"既不合语义,也是 V1 明确要挡住的方向(绝不含他人的个人项)。
+ * 它仍然是 list_events 的一列 —— 需要时用 list_events(scope 缺省)去看。
+ *
+ * 顺带:惰性续期也按同一套口径做,所以 get_today **不会**顺手续期别人的系列,
+ * 更不会因为它读不到就静默少一条自己的日程。
+ */
+export function listEventsOnDay(db: Db, viewer: Viewer, timezone: string, day: string): DayEvents {
+  // 惰性续期(设计 §4):今天也在 92 天物化窗口之内,但系列可能是更早创建的,
+  // 所以仍走同一条续期路径(读绝不因续期失败而整体报错)。
+  const renewal = renewRepeatingSeries(db, viewer, timezone, day, "family_or_mine");
+
+  const { where, params } = visibilityWhere("l", "family_or_mine", viewer);
+  // 重叠判定(复用 timeKey:纯日期的那一天 = 00:00–23:59,all_day 的纯日期日程天然落在里面),
+  // 昨天开始、后天结束的进行中日程也会出现,明天的日程不会。
+  const startKey = timeKey(day, false);
+  const endKey = timeKey(day, true);
+  const rows = db
+    .prepare(
+      `${LIST_INSTANCES} WHERE ${where} AND l.start_key <= ? AND l.end_key >= ?
+        ORDER BY l.start_key ASC, l.start ASC, l.id ASC`,
+    )
+    .all(...params, endKey, startKey) as InstanceJoinRow[];
+  const views = rows.map(toView);
+  return {
+    family: views.filter((v) => v.owner_id === null),
+    mine: views.filter((v) => v.owner_id === viewer.memberId),
+    note: renewalNote(renewal),
+  };
 }
 
 // ─────────────────────────── update_event ───────────────────────────

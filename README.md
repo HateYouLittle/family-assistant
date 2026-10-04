@@ -2,13 +2,14 @@
 
 一个给 AI Agent 当后端的家庭事务程序:**待办 / 日程 / 记账**做成 MCP 工具,供 Hermes Agent 调用。程序本身没有对话能力,也不解析自然语言——家人在 QQ/微信里和 Hermes 说话,Hermes 负责理解意图,本程序负责事实:数据、校验、统计与回执话术。
 
-设计方案见 `docs/设计方案.md`(v0.6)。**身份最小闭环(Spike 01)已通过**,三个域全部接入:待办 6 个 + 日程 4 个 + 记账 7 个 + `list_members` + `restore_deleted` = **19 个工具**,说话人以按成员的 token 绑定(`docs/spike-01-identity-binding.md`)。
+设计方案见 `docs/设计方案.md`(v0.6)。**身份最小闭环(Spike 01)已通过**,三个域全部接入:待办 6 个 + 日程 4 个 + 记账 7 个 + 通用域 2 个 + `restore_deleted` = **20 个工具**,说话人以按成员的 token 绑定(`docs/spike-01-identity-binding.md`)。
 
 ## 当前范围
 
 | 工具 | 说明 |
 |---|---|
 | `list_members()` | 成员名单(name + aliases),供归属参数(owner / member_id)解析 |
+| `get_today()` | 通用域:**无参数**。分列三块——本人今日到期的未完成待办 / 本人逾期待办 / 今天的日程(全家 + 我的个人两列)。绝不含他人的个人项;Agent 开场与定时个人摘要共用 |
 | `add_todo(owner?, title, due_date?, notes?)` | 添加待办;owner 指定他人即"代记"(V4) |
 | `list_todos(done?, due_before?, due_after?, q?)` | 只返回本人待办 + 本人代记的待办(V1/V8) |
 | `update_todo(id, …)` / `complete_todo(id)` / `reopen_todo(id)` / `delete_todo(id)` | 仅限本人待办(V3/V6);owner 不可改(V7) |
@@ -70,7 +71,7 @@ npm run admin -- token revoke tok_xxx        # 吊销
 ## 测试
 
 ```bash
-npm test          # 89 个用例:领域集成 + X1/X9/X15/X16 反例 + golden + 身份声明头(B1) + 审计 + 迁移 + MCP HTTP e2e
+npm test          # 322 个用例:领域集成 + X1/X9/X15/X16 反例 + golden + 身份声明头(B1) + 审计 + 迁移 + 时区口径 + MCP HTTP e2e
 ```
 
 - **golden 契约测试**(`test/golden/tools.json`):工具名、description、inputSchema 逐字冻结(P8)。有意变更时运行 `npx tsx scripts/dump-golden.ts` 重新生成,并按 diff 审查。
@@ -93,7 +94,7 @@ src/
   config.ts        环境变量配置(时区显式化,不依赖系统本地时区;身份声明头默认必填)
   db/              openDb(WAL)/ 迁移(v1 成员·token·todo;v2 category·entry·event·audit_log)/ id 生成(时间序前缀)
   domain/          领域层:信封与错误码、authenticate(token→成员)、viewer(可见性判定入口)、
-                   members、todos、events、ledger(分类与流水)、restore ——
+                   members、todos、events、ledger(分类与流水)、today(今日概览)、restore ——
                    V1–V9 全部收敛在这一层,可脱离 MCP 直接测试
   audit/           写操作审计(append-only,记录点在工具层入口;只记关键字段元数据)
   mcp/             zod 严格 schema、工具定义(P8 中文描述)、低级 MCP Server、

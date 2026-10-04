@@ -76,11 +76,11 @@ function envelopeOf(result: unknown): { envelope: Record<string, unknown>; isErr
 }
 
 describe("MCP HTTP 端到端", () => {
-  it("有效 token:tools/list 暴露 19 个工具(含 S1 的 4 个写工具、S2 的日程域 4 个与 S3 的记账域 7 个);list_members 走通", async () => {
+  it("有效 token:tools/list 暴露 20 个工具(含 S1 的 4 个写工具、S2 的日程域 4 个、S3 的记账域 7 个与 S4 的通用域 get_today);list_members 走通", async () => {
     const client = await connect(authHeaders(mama, tokenMama));
     try {
       const tools = await client.listTools();
-      assert.equal(tools.tools.length, 19);
+      assert.equal(tools.tools.length, 20);
       assert.deepEqual(
         tools.tools.map((t) => t.name).sort(),
         [
@@ -92,6 +92,7 @@ describe("MCP HTTP 端到端", () => {
           "delete_entry",
           "delete_event",
           "delete_todo",
+          "get_today",
           "list_categories",
           "list_entries",
           "list_events",
@@ -105,7 +106,7 @@ describe("MCP HTTP 端到端", () => {
           "update_todo",
         ],
       );
-      // S1 的 4 个新写工具 + S2 的 4 个日程工具 + S3 的 7 个记账工具
+      // S1 的 4 个新写工具 + S2 的 4 个日程工具 + S3 的 7 个记账工具 + S4 的 get_today
       // 确实在工具面里(不靠"数量对得上"蒙混)
       for (const name of [
         "update_todo",
@@ -123,6 +124,7 @@ describe("MCP HTTP 端到端", () => {
         "summarize_entries",
         "update_entry",
         "delete_entry",
+        "get_today",
       ]) {
         assert.ok(
           tools.tools.some((t) => t.name === name),
@@ -225,8 +227,8 @@ describe("MCP HTTP 端到端", () => {
     const client = await connect({ Authorization: `Bearer ${tokenBaba}` });
     try {
       const listed = (await client.listTools()).tools;
-      assert.equal(listed.length, 19);
-      // 工具面不含身份信息:未带声明头也照样能列全 19 个工具
+      assert.equal(listed.length, 20);
+      // 工具面不含身份信息:未带声明头也照样能列全 20 个工具
       assert.deepEqual(
         listed.map((t) => t.name).sort(),
         [
@@ -238,6 +240,7 @@ describe("MCP HTTP 端到端", () => {
           "delete_entry",
           "delete_event",
           "delete_todo",
+          "get_today",
           "list_categories",
           "list_entries",
           "list_events",

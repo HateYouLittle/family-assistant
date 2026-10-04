@@ -162,6 +162,24 @@ function queryTodos(db: Db, extraWhere: string, params: unknown[], input: ListTo
   return rows.map(toView);
 }
 
+/**
+ * 本人**未完成且有截止日期、截止 ≤ day** 的待办(今日到期 + 逾期合成一份,get_today 的数据源)。
+ *
+ * 口径说明:
+ * - 只取 `owner_id = 说话人`:**不含**"本人代他人记的待办"(V8 的查看权)。
+ *   理由同 listEventsOnDay —— 「我今天有什么事」不该混进别人家的私人待办;
+ *   要看代记的那些用 list_todos(V8 仍完整保留)。
+ * - `done = 0`:今日已完成的不进「今天」(它已经办完了,再提醒一次是噪声)。
+ * - `due_date IS NOT NULL AND due_date <= day`:无截止日期的不进「今天」也不进「逾期」——
+ *   「没有截止」不等于「今天要做」,把它算进逾期会凭空造出一个不存在的 deadline。
+ */
+export function listOwnOpenTodosDueBy(db: Db, caller: Caller, day: string): TodoView[] {
+  return queryTodos(db, "t.owner_id = ? AND t.done = 0 AND t.due_date IS NOT NULL AND t.due_date <= ?", [
+    caller.memberId,
+    day,
+  ], {});
+}
+
 function todoLine(v: TodoView, index: number, today: string): string {
   const state = v.done ? "已完成" : v.due_date ? describeDue(v.due_date, today) : "无截止日期";
   return `${index}. [${v.id}] ${v.title}(${state})`;

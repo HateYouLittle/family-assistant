@@ -15,6 +15,7 @@ import {
 } from "../domain/ledger.js";
 import { listMembersEnvelope } from "../domain/members.js";
 import { restoreDeleted } from "../domain/restore.js";
+import { getToday } from "../domain/today.js";
 import { addTodo, completeTodo, deleteTodo, listTodos, reopenTodo, updateTodo } from "../domain/todos.js";
 import type { Viewer } from "../domain/viewer.js";
 import {
@@ -26,6 +27,7 @@ import {
   deleteEntrySchema,
   deleteEventSchema,
   deleteTodoSchema,
+  getTodaySchema,
   listCategoriesSchema,
   listEntriesSchema,
   listEventsSchema,
@@ -41,9 +43,10 @@ import {
 } from "./schemas.js";
 
 /**
- * 工具面(S3:list_members + 待办域 6 个 + 日程域 4 个 + 记账域 7 个 + restore_deleted = 19 个;
- * 其中 restore_deleted 是三域共用的软删逆操作,排在最后)。description 即契约(P8):中文、显式写出拒绝条件、
- * 给一个正确示例、并声明"说话人不是参数"。description 与 schema 变更同等对待,走 golden 测试。
+ * 工具面(S4:通用域 2 个(list_members + get_today)+ 待办域 6 个 + 日程域 4 个 + 记账域 7 个
+ * + restore_deleted = 20 个;其中 restore_deleted 是三域共用的软删逆操作,排在最后)。
+ * description 即契约(P8):中文、显式写出拒绝条件、给一个正确示例、并声明"说话人不是参数"。
+ * description 与 schema 变更同等对待,走 golden 测试。
  *
  * 工具层保持薄壳:参数转换 + 话术拼装之外的规则全部在 domain 层。
  * 说话人以 Viewer 形态从上层传进来(连接身份),工具面没有身份参数、也不感知身份。
@@ -55,6 +58,8 @@ import {
  * S3 同理:记账域的 4 个写工具(add_entry / update_entry / delete_entry / add_category)留痕,
  * 3 个读工具(list_entries / summarize_entries / list_categories)不记;
  * `note` 是自由文本,**不进审计摘要**(不把私账备注再复制一份)。
+ * S4 同理:get_today 是读工具,**不记审计**;它同样可能触发日程的惰性续期(与 list_events
+ * 同一条续期路径,同一条纪律:续期写不经用户发起,不单独留痕)。
  */
 
 export interface ToolDefinition {
@@ -121,6 +126,22 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       "示例:list_members()。",
     schema: listMembersSchema,
     run: (db, viewer) => listMembersEnvelope(db, viewer),
+  }),
+  defineTool({
+    name: "get_today",
+    description:
+      "拉取**说话人本人**今天的概览,**无参数**:说话人由连接确定,所以不要传任何东西(传 as_member / owner 之类一律返回 INVALID_PARAMS)。" +
+      "返回**分列**的三块,各自转述、不要混成一句:① 本人今日到期的未完成待办;② 本人逾期未完成的待办;" +
+      "③ 今天的日程,分「全家日程」与「我的个人日程」两列。" +
+      "取舍口径:今日已完成的不再出现(已经办完,再提醒一次是噪声);无截止日期的待办既不算今天也不算逾期(没有截止就没有逾期);" +
+      "日程按与今天**有重叠**判定,跨天仍在进行的日程也会出现,明天的不会。" +
+      "「今天」按家庭配置时区(FA_TIMEZONE)算,不按机器本地时区。" +
+      "可见范围:只含本人的待办与本人的个人日程 + 全家日程 —— **他人的个人项一概不出现**(代他人记的那些要查用 list_todos / list_events)。" +
+      "两个用途:每轮对话开场先拉一次再回话;以及定时任务里的个人每日摘要数据源(定时任务在家人不在场时触发,同样不要传身份)。" +
+      "示例:get_today()。",
+    schema: getTodaySchema,
+    // 读工具:不提供 audit 摘要器 → 不记审计(与 list_todos / list_events 同一纪律)。
+    run: (db, viewer, tz) => getToday(db, viewer, tz),
   }),
   defineTool({
     name: "add_todo",

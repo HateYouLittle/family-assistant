@@ -29,9 +29,12 @@ describe("工具面 golden(P8)", () => {
     }
   });
 
-  it("S3 范围:恰好 19 个工具(12 个原有 + 记账域 7 个),无任何身份参数形态", () => {
+  it("S4 范围:恰好 20 个工具(19 个原有 + 通用域 get_today),无任何身份参数形态", () => {
     assert.deepEqual(TOOL_DEFINITIONS.map((t) => t.name), [
       "list_members",
+      // get_today 紧跟 list_members:两者都是**通用域**(无参数 / 与域无关的读),
+      // 设计 §5 的工具清单也是这么排的(通用(2)排在最前)。
+      "get_today",
       "add_todo",
       "list_todos",
       "update_todo",
@@ -65,11 +68,38 @@ describe("工具面 golden(P8)", () => {
       assert.match(t.description, /示例:/, `${t.name} 缺少示例`);
       assert.match(t.description, /说话人由连接确定/, `${t.name} 未声明说话人不是参数`);
     }
-    assert.match(TOOL_DEFINITIONS[1]!.description, /MISSING_PARAMS/);
-    assert.match(TOOL_DEFINITIONS[1]!.description, /AMBIGUOUS/);
-    assert.match(TOOL_DEFINITIONS[2]!.description, /INVALID_PARAMS/);
-    assert.match(TOOL_DEFINITIONS[2]!.description, /互相不可见/);
-    assert.match(TOOL_DEFINITIONS[3]!.description, /DENIED/);
+    // 按名字取(不再按下标):S4 在通用域插入了 get_today,下标已经整体后移,
+    // 按下标断言会让"改一个工具的位置"静默地换掉被断言的工具。
+    const byName = (name: string): string => {
+      const t = TOOL_DEFINITIONS.find((x) => x.name === name);
+      assert.ok(t, `缺少 ${name}`);
+      return t!.description;
+    };
+    assert.match(byName("add_todo"), /MISSING_PARAMS/);
+    assert.match(byName("add_todo"), /AMBIGUOUS/);
+    assert.match(byName("list_todos"), /INVALID_PARAMS/);
+    assert.match(byName("list_todos"), /互相不可见/);
+    assert.match(byName("update_todo"), /DENIED/);
+  });
+
+  it("S4:get_today 的 description 把「无参数」与两个用途写出来(P8 ②③)", () => {
+    const t = TOOL_DEFINITIONS.find((x) => x.name === "get_today");
+    assert.ok(t, "缺少 get_today");
+    // ① 无参数 + 说话人来自连接(P7/X15):传任何东西都 INVALID_PARAMS。
+    assert.match(t!.description, /无参数/);
+    assert.match(t!.description, /说话人由连接确定/);
+    assert.match(t!.description, /INVALID_PARAMS/);
+    // ② 三块分列 + 归属列标注。
+    assert.match(t!.description, /分列/);
+    assert.match(t!.description, /全家日程/);
+    assert.match(t!.description, /我的个人日程/);
+    // ③ 两个用途:开场拉取 + 定时任务个人摘要(设计 §5 / §3.3)。
+    assert.match(t!.description, /开场/);
+    assert.match(t!.description, /每日摘要/);
+    // ④ 时区口径写在契约里(模型读不到设计文档)。
+    assert.match(t!.description, /时区/);
+    // ⑤ 示例。
+    assert.match(t!.description, /示例:get_today\(\)。/);
   });
 
   it("P8 ④:不可变字段的拒绝条件写进 description(V7 固定话术)", () => {

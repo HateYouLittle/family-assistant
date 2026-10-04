@@ -83,6 +83,16 @@ export const deleteTodoSchema = z.strictObject({
   id: z.string().min(1).max(40).describe("待办 id,从 list_todos 的结果里原样复制。软删,可恢复。"),
 });
 
+// ─────────────────────────── 通用域(S4) ───────────────────────────
+
+/**
+ * get_today:**无参数**(设计 §5「通用(2)」)。
+ *
+ * z.strictObject({}) + 传任何东西都 INVALID_PARAMS,这是 X15 在通用域的落点:
+ * 说话人来自连接,模型没有可填的位置;`as_member` / `owner` 之类一律按未知字段拒绝。
+ */
+export const getTodaySchema = z.strictObject({});
+
 // ─────────────────────────── 日程域(S2) ───────────────────────────
 
 /**
@@ -465,6 +475,7 @@ export const restoreDeletedSchema = z.strictObject({
 });
 
 export type ListMembersArgs = z.infer<typeof listMembersSchema>;
+export type GetTodayArgs = z.infer<typeof getTodaySchema>;
 export type AddTodoArgs = z.infer<typeof addTodoSchema>;
 export type ListTodosArgs = z.infer<typeof listTodosSchema>;
 export type CompleteTodoArgs = z.infer<typeof completeTodoSchema>;
